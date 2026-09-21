@@ -1,0 +1,129 @@
+[
+  {
+    "listing_id": "sample-clean-001",
+    "source": "sample",
+    "url": "https://example.com/listing/1",
+    "vehicle": {
+      "make": "현대", "model": "그랜저", "trim": "IG 2.4",
+      "model_year": 2019, "first_registration_date": "2019-03-15",
+      "mileage_km": 62000, "transmission": "automatic", "fuel_type": "gasoline",
+      "body_type": "준대형", "price_krw": 18500000, "new_car_price_krw": 32000000,
+      "region": "서울 강남구"
+    },
+    "insurance_history": {
+      "usage_history": {"rental_used": false, "taxi_used": false, "business_used": false},
+      "owner_change_count": 1,
+      "owner_change_log": [{"date": "2019-03-15", "note": "최초출고"}],
+      "own_damage_claims": [
+        {"date": "2020-05-01", "amount_krw": 800000},
+        {"date": "2021-11-10", "amount_krw": 1200000}
+      ],
+      "other_party_damage_claims": [],
+      "info_unavailable_periods": [],
+      "history_disclosed": true
+    },
+    "performance_record": {
+      "panel_exchange": ["front_bumper"],
+      "frame_damage": [],
+      "leak_records": [],
+      "third_party_inspection": {"provider": "encar_diagnosis", "panel_ok": true, "frame_ok": true}
+    },
+    "dealer": {"dealer_id": "d-001", "join_year": 2015, "total_sales_count": 620, "active_listings_count": 12, "region": "서울 강남구"},
+    "listing_text": {"description_raw": "1인 소유 무사고에 가까운 관리 잘 된 차량입니다.", "claims_parsed": ["1인소유"]},
+    "photos": {"urls": [], "vision_analysis": null},
+    "tire_brand": "미쉐린"
+  },
+  {
+    "listing_id": "sample-frame-damage-002",
+    "source": "sample",
+    "url": "https://example.com/listing/2",
+    "vehicle": {
+      "make": "기아", "model": "K5", "trim": "2.0 가솔린",
+      "model_year": 2018, "first_registration_date": "2018-06-01",
+      "mileage_km": 91000, "transmission": "automatic", "fuel_type": "gasoline",
+      "body_type": "준중형", "price_krw": 11000000, "new_car_price_krw": 23000000,
+      "region": "경기 부천시"
+    },
+    "insurance_history": {
+      "usage_history": {"rental_used": false, "taxi_used": false, "business_used": false},
+      "owner_change_count": 2,
+      "owner_change_log": [],
+      "own_damage_claims": [{"date": "2022-02-01", "amount_krw": 6500000}],
+      "other_party_damage_claims": [],
+      "info_unavailable_periods": [],
+      "history_disclosed": true
+    },
+    "performance_record": {
+      "panel_exchange": ["hood", "front_fender_l", "front_bumper"],
+      "frame_damage": ["front_side_member"],
+      "leak_records": [],
+      "third_party_inspection": {"provider": "none", "panel_ok": false, "frame_ok": false}
+    },
+    "dealer": {"dealer_id": "d-002", "join_year": 2022, "total_sales_count": 40, "active_listings_count": 30, "region": "경기 부천시"},
+    "listing_text": {"description_raw": "가격 좋은 매물입니다.", "claims_parsed": []},
+    "photos": {"urls": [], "vision_analysis": null},
+    "tire_brand": null
+  },
+  {
+    "listing_id": "sample-mismatch-003",
+    "source": "sample",
+    "url": "https://example.com/listing/3",
+    "vehicle": {
+      "make": "쌍용", "model": "렉스턴", "trim": "스포츠 4WD",
+      "model_year": 2020, "first_registration_date": "2020-01-10",
+      "mileage_km": 48000, "transmission": "automatic", "fuel_type": "diesel",
+      "body_type": "픽업트럭", "price_krw": 21000000, "new_car_price_krw": 35000000,
+      "region": "인천 남동구"
+    },
+    "insurance_history": {
+      "usage_history": {"rental_used": false, "taxi_used": false, "business_used": false},
+      "owner_change_count": 1,
+      "owner_change_log": [],
+      "own_damage_claims": [],
+      "other_party_damage_claims": [{"date": "2021-08-20", "amount_krw": 7200000}],
+      "info_unavailable_periods": [],
+      "history_disclosed": true
+    },
+    "performance_record": {
+      "panel_exchange": ["trunk"],
+      "frame_damage": [],
+      "leak_records": [],
+      "third_party_inspection": {"provider": "none", "panel_ok": true, "frame_ok": true}
+    },
+    "dealer": {"dealer_id": "d-003", "join_year": 2018, "total_sales_count": 300, "active_listings_count": 8, "region": "인천 남동구"},
+    "listing_text": {"description_raw": "무사고 차량입니다.", "claims_parsed": ["무사고"]},
+    "photos": {"urls": [], "vision_analysis": null},
+    "tire_brand": null
+  },
+  {
+    "listing_id": "sample-history-hidden-004",
+    "source": "sample",
+    "url": "https://example.com/listing/4",
+    "vehicle": {
+      "make": "BMW", "model": "5시리즈", "trim": "520d",
+      "model_year": 2017, "first_registration_date": "2017-09-01",
+      "mileage_km": 120000, "transmission": "automatic", "fuel_type": "diesel",
+      "body_type": "중형", "price_krw": 19000000, "new_car_price_krw": 65000000,
+      "region": "대전"
+    },
+    "insurance_history": {
+      "usage_history": {"rental_used": false, "taxi_used": false, "business_used": false},
+      "owner_change_count": 3,
+      "owner_change_log": [],
+      "own_damage_claims": [],
+      "other_party_damage_claims": [],
+      "info_unavailable_periods": [],
+      "history_disclosed": false
+    },
+    "performance_record": {
+      "panel_exchange": [],
+      "frame_damage": [],
+      "leak_records": [],
+      "third_party_inspection": {"provider": "none", "panel_ok": null, "frame_ok": null}
+    },
+    "dealer": {"dealer_id": "d-004", "join_year": 2021, "total_sales_count": 15, "active_listings_count": 20, "region": "대전"},
+    "listing_text": {"description_raw": "가성비 최고 수입차!", "claims_parsed": []},
+    "photos": {"urls": [], "vision_analysis": null},
+    "tire_brand": null
+  }
+]

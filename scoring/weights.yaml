@@ -1,0 +1,65 @@
+# 스코어링 가중치 설정 (스펙 5장). 값을 바꿔서 튜닝 가능.
+# risk_score는 50점에서 시작해 아래 규칙들을 가감한다.
+
+base_score: 50
+
+hard_filters:
+  info_unavailable_years_threshold: 3  # 자차보험 미가입 추정 기간 임계값(년)
+
+risk_rules:
+  single_owner_bonus: 15               # owner_change_count <= 1
+  owner_change_penalty: -3             # 명의변경 1회당 (경차는 완화)
+  owner_change_penalty_light_car: -1   # 경차 명의변경 1회당 완화값
+  commercial_use_penalty: -20          # 렌트/택시/영업용 이력
+  commercial_use_penalty_mitigated: -10  # 사고 이후 2년 이상 지속 운행 시 완화값
+  commercial_use_mitigation_years: 2
+  panel_exchange_penalty_per_item: -2  # 외판 교환 항목당(프레임 무관)
+  fender_hood_combo_penalty: -10       # 펜더+후드 동시 교환 추가 감점
+  high_value_claim_threshold_krw: 5_000_000
+  high_value_claim_penalty: -15
+  small_claim_threshold_krw: 3_000_000
+  small_claim_min_count: 2
+  small_claim_bonus_per_item: 3
+  small_claim_bonus_max: 9
+  third_party_inspection_bonus: 10
+  dealer_trust_join_years_threshold: 5
+  dealer_trust_sales_threshold: 500
+  dealer_trust_bonus: 10
+  region_risk_penalty: -5
+  premium_tire_bonus: 2
+  vision_repaint_suspicion_penalty: -5
+  total_loss_or_flood_penalty: -20     # 전손/침수 이력 확인(KB차차차 등 소스에서만 채워짐)
+  accident_history_flag_penalty: -5    # 부위별 상세 없는 포괄적 "사고있음" 배지(KB차차차)
+  unexplained_mismatch_penalty: -25
+
+region_risk_list:
+  - 인천
+  - 부천
+
+premium_tire_brands:
+  - 미쉐린
+  - michelin
+  - 굿이어
+  - goodyear
+  - 피렐리
+  - pirelli
+  - 브리지스톤
+  - bridgestone
+  - 콘티넨탈
+  - continental
+
+# 경차 판정을 위한 모델명 키워드(엔진 배기량 필드가 스키마에 없어 모델명 기반 근사치 사용).
+light_car_models:
+  - 모닝
+  - 스파크
+  - 레이
+  - 캐스퍼
+  - 티코
+  - 마티즈
+  - 비스토
+
+final_ranking:
+  value_mode_risk_threshold: 60  # 가성비 우선 모드에서 이 점수 이상만 후보로 삼음
+
+mileage:
+  high_annual_mileage_km: 30_000  # 이 이상이면 "장거리 위주일 수 있음" 참고 힌트 노출
