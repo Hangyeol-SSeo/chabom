@@ -83,6 +83,26 @@ def test_encar_lookup_copies_open_browser_session_first(tmp_path, monkeypatch):
     assert result['ok'] is False
 
 
+def test_kcar_lookup_copies_open_browser_session_first(tmp_path, monkeypatch):
+    import server
+    monkeypatch.setattr(server, 'HISTORY_DB_PATH', tmp_path / 'history.db')
+    copied = []
+
+    async def snapshot():
+        copied.append(True)
+
+    monkeypatch.setattr(server._kcar_session, 'snapshot', snapshot)
+    monkeypatch.setattr(server, '_identify_source', lambda _url: ('kcar', True))
+
+    def fake_lookup(_req):
+        assert copied == [True]
+        return {'ok': False, 'reason': '합성 조회 실패'}
+
+    monkeypatch.setattr(server, '_lookup', fake_lookup)
+    result = asyncio.run(server.lookup(server.LookupRequest(url='https://kcar.example.com/bc/detail/carInfoDtl?i_sCarCd=SYNTHETIC')))
+    assert result['ok'] is False
+
+
 def test_verify_saves_manual_link(tmp_path, monkeypatch):
     import server
     monkeypatch.setattr(server, 'HISTORY_DB_PATH', tmp_path / 'history.db')

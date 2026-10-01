@@ -43,8 +43,9 @@ from crawler.adapters.bobaedream_adapter import BobaedreamAdapter
 from crawler.adapters.encar_detail_adapter import AUTH_STATE_PATH, EncarDetailAdapter
 from crawler.encar_session import EncarSessionManager
 from crawler.adapters.kbchachacha_adapter import KbchachachaAdapter
-from crawler.adapters.kcar_detail_adapter import KcarDetailAdapter
+from crawler.adapters.kcar_detail_adapter import AUTH_STATE_PATH as KCAR_AUTH_STATE_PATH, KcarDetailAdapter
 from crawler.browser_fetch import BrowserFetcher
+from crawler.site_session import SiteSessionManager
 from normalizer.schema import Listing
 from scoring.checklist import ChecklistResult, DealerStatus, evaluate_checklist
 from scoring.scorer import load_weights
@@ -64,6 +65,7 @@ app.add_middleware(
 
 _fetcher = BrowserFetcher()
 _encar_session = EncarSessionManager(AUTH_STATE_PATH)
+_kcar_session = SiteSessionManager(KCAR_AUTH_STATE_PATH, "https://www.kcar.com/")
 _weights = load_weights()
 DEALERS_DB_PATH = Path(__file__).parent / "data/dealers.db"
 HISTORY_DB_PATH = Path(__file__).parent / "data/listings.db"
@@ -84,7 +86,7 @@ _SOURCE_HOSTS = {
 _ADAPTERS = {
     "bobaedream": lambda: BobaedreamAdapter(fetcher=_fetcher),
     "kbchachacha": lambda: KbchachachaAdapter(fetcher=_fetcher),
-    "kcar": lambda: KcarDetailAdapter(fetcher=_fetcher),
+    "kcar": lambda: KcarDetailAdapter(),
     # Encar 로그인 상태 파일은 조회마다 새 컨텍스트에 반영한다.
     "encar": lambda: EncarDetailAdapter(),
 }
@@ -159,17 +161,40 @@ async def encar_session_cancel(request: Request) -> dict:
     return {"status": await _encar_session.cancel()}
 
 
+@app.get("/api/kcar/session")
+def kcar_session_status() -> dict:
+    return {"status": _kcar_session.status()}
+
+
+@app.post("/api/kcar/session/start")
+async def kcar_session_start(request: Request) -> dict:
+    _require_local_json(request)
+    try:
+        return {"status": await _kcar_session.start()}
+    except Exception as exc:
+        logger.warning("K Car 탐색 창 열기 실패: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="케이카 창을 열지 못했습니다. 브라우저 실행 상태를 확인해주세요.") from None
+
+
+@app.post("/api/kcar/session/cancel")
+async def kcar_session_cancel(request: Request) -> dict:
+    _require_local_json(request)
+    return {"status": await _kcar_session.cancel()}
+
+
 @app.post("/api/lookup")
 async def lookup(req: LookupRequest) -> dict:
     try:
         url = history_store.normalize_url(req.url)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    if _identify_source(url)[0] == "encar":
+    source = _identify_source(url)[0]
+    session = {"encar": _encar_session, "kcar": _kcar_session}.get(source)
+    if session:
         try:
-            await _encar_session.snapshot()
+            await session.snapshot()
         except Exception as exc:
-            logger.warning("Encar 탐색 창 세션 저장 실패: %s", type(exc).__name__)
+            logger.warning("%s 탐색 창 세션 저장 실패: %s", source, type(exc).__name__)
     result = await run_in_threadpool(_lookup, LookupRequest(url=url))
     if result.get('listing'):
         listing = Listing.from_dict(result['listing'])
@@ -226,7 +251,7 @@ def _lookup(req: LookupRequest) -> dict:
         logger.warning("단건 조회 실패: %s (%s)", req.url, exc)
         return {"ok": False, "reason": f"조회에 실패했습니다: {exc}"}
     finally:
-        if source == "encar":
+        if source in {"encar", "kcar"}:
             adapter.fetcher.close()
     return {"ok": True, "listing": listing.to_dict()}
 
@@ -390,6 +415,7 @@ def _result_to_dict(result: ChecklistResult, listing: Listing) -> dict:
 async def _shutdown() -> None:
     _fetcher.close()
     await _encar_session.close()
+    await _kcar_session.close()
 
 
 app.mount("/", StaticFiles(directory="web", html=True), name="web")

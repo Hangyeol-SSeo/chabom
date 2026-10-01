@@ -15,7 +15,7 @@ with tempfile.TemporaryDirectory() as directory:
     sample={'source':'encar','listing_id':'123','url':'https://example.com/car','vehicle':{'make':'기아','model':'더 뉴 모닝','model_year':2021,'mileage_km':32000,'price_krw':8900000,'region':'서울'},'dealer':{'dealer_id':'dealer-1','display_name':'테스트판매자A','phone':'01000000000','region':'서울 강남'},'insurance_history':{'own_damage_claims':[{'amount_krw':5000000}],'owner_change_count':1,'number_change_count':1,'usage_change_count':1,'history_detail_status':'available','coverage_verified':True,'history_warnings':{'자차 보험 미가입 기간':'없음'},'history_events':[{'category':'소유자변경','date':'2021-03-14','summary':'당사자 거래이전','details':{'변경일자':'2021년 03월 14일'}},{'category':'차량번호변경','date':'2022-07-01','summary':'번호 변경','details':{}}]},'performance_record':{'record_available':True,'record_url':'https://example.com/record/123','panel_exchange':['프론트 휀더(우) · 교환'],'third_party_inspection':{'frame_ok':True}}}
     with closing(history.get_connection(server.HISTORY_DB_PATH)) as conn:
         history.record(conn,sample['url'],source='encar',listing=sample)
-        history.record(conn,'https://example.com/car2',source='kcar',listing={'source':'kcar','listing_id':'456','vehicle':{'make':'현대','model':'캐스퍼','model_year':2023,'price_krw':15000000},'dealer':{'dealer_id':'dealer-2','display_name':'테스트판매자B'}})
+        history.record(conn,'https://example.com/car2',source='kcar',listing={'source':'kcar','listing_id':'456','url':'https://example.com/car2','vehicle':{'make':'현대','model':'캐스퍼','model_year':2023,'price_krw':15000000},'dealer':{'dealer_id':'dealer-2','display_name':'테스트판매자B'},'insurance_history':{'history_detail_status':'available','coverage_verified':True,'owner_change_count':2,'number_change_count':0,'history_events':[{'category':'소유자 변경','date':'2022-05-06','summary':'합성 거래','details':{}}]},'performance_record':{'record_available':True,'record_images':['https://images.example.com/test-record.jpg'],'panel_exchange_count':2,'panel_exchange':['외판 교환 2건(케이카 진단)'],'third_party_inspection':{'frame_ok':True}}})
         history.record(conn,'https://example.com/failed',status='failed',reason='조회 실패')
     service=uvicorn.Server(uvicorn.Config(server.app,host='127.0.0.1',port=8765,log_level='error'))
     thread=threading.Thread(target=service.run,daemon=True);thread.start()
@@ -35,6 +35,14 @@ with tempfile.TemporaryDirectory() as directory:
                 route.fulfill(status=200,content_type='application/json',body='{"status":"'+auth['status']+'"}')
             page.route('**/api/encar/session',mock_encar_session)
             page.route('**/api/encar/session/**',mock_encar_session)
+            kcar_auth={'status':'none'}
+            def mock_kcar_session(route):
+                suffix=route.request.url.rsplit('/',1)[-1]
+                if suffix=='start':kcar_auth['status']='waiting'
+                elif suffix=='cancel':kcar_auth['status']='saved'
+                route.fulfill(status=200,content_type='application/json',body='{"status":"'+kcar_auth['status']+'"}')
+            page.route('**/api/kcar/session',mock_kcar_session)
+            page.route('**/api/kcar/session/**',mock_kcar_session)
             page.goto('http://127.0.0.1:8765')
             expect(page.locator('.car-row')).to_have_count(3)
             expect(page.get_by_role('heading',name='엔카 사이트 연결')).to_be_visible()
@@ -42,8 +50,13 @@ with tempfile.TemporaryDirectory() as directory:
             expect(page.get_by_text('엔카 창 열림')).to_be_visible()
             page.get_by_role('button',name='엔카 창 닫기').click()
             expect(page.get_by_text('이전 세션 있음')).to_be_visible()
+            expect(page.get_by_role('heading',name='케이카 사이트 연결')).to_be_visible()
+            page.get_by_role('button',name='케이카 사이트 열기').click()
+            expect(page.get_by_text('케이카 창 열림')).to_be_visible()
+            page.get_by_role('button',name='케이카 창 닫기').click()
             page.get_by_role('link',name='매물 확인',exact=True).click()
             expect(page.get_by_role('heading',name='엔카 사이트 연결')).to_be_visible()
+            expect(page.get_by_role('heading',name='케이카 사이트 연결')).to_be_visible()
             page.get_by_role('link',name='차량 보관함',exact=False).last.click()
             page.get_by_role('button',name='기아 더 뉴 모닝 찜하기',exact=True).click()
             page.get_by_role('button',name='찜한 매물1',exact=True).click()
@@ -53,6 +66,12 @@ with tempfile.TemporaryDirectory() as directory:
             page.get_by_label('차량 검색').fill('캐스퍼');expect(page.locator('.car-row')).to_have_count(1)
             page.get_by_label('차량 검색').fill('');page.get_by_label('차량 정렬').select_option('price-high')
             expect(page.locator('.car-title').first).to_have_text('현대 캐스퍼')
+            page.get_by_role('button',name='현대 캐스퍼',exact=True).click()
+            expect(page.get_by_role('heading',name='보험·차량 상세 이력')).to_be_visible()
+            expect(page.get_by_text('2022-05-06')).to_be_visible()
+            expect(page.get_by_text('원본 1쪽 열기')).to_be_visible()
+            expect(page.locator('.evidence-metrics').filter(has_text='외판 교환')).to_contain_text('2건')
+            page.get_by_role('link',name='차량 보관함',exact=False).last.click()
             page.screenshot(path='/tmp/chabom-garage-desktop.png',full_page=True)
             page.get_by_role('button',name='기아 더 뉴 모닝',exact=True).click()
             expect(page.get_by_role('heading',name='보험·차량 상세 이력')).to_be_visible()

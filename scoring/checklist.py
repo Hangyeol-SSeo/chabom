@@ -131,7 +131,7 @@ def _insurance_history_item(listing: Listing) -> ChecklistItem:
             "사고 이력이 누락됐을 수 있습니다",
             critical=True,
         )
-    if not ih.coverage_verified and listing.source == "encar":
+    if not ih.coverage_verified and listing.source in {"encar", "kcar"}:
         return ChecklistItem(
             "insurance_history", "보험이력 조회", "unknown",
             "차량이력 요약만으로는 자차 보험 미가입 기간이 없다고 확인할 수 없습니다 — 상세 이력 확인 필요",

@@ -118,6 +118,15 @@ def test_encar_summary_without_coverage_confirmation_forces_hold():
     assert result.overall == "hold"
 
 
+def test_kcar_summary_without_insurance_detail_forces_hold():
+    listing = clean_listing()
+    listing.source = "kcar"
+    listing.insurance_history.coverage_verified = False
+    result = evaluate_checklist(listing, weights=WEIGHTS)
+    assert item(result, "insurance_history").verdict == "unknown"
+    assert result.overall == "hold"
+
+
 def test_info_gap_fails_even_when_disclosed():
     from normalizer.schema import InfoUnavailablePeriod
 
