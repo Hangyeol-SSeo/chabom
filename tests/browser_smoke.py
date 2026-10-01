@@ -1,13 +1,30 @@
 """브라우저 통합 확인: PYTHONPATH=. .venv/bin/python tests/browser_smoke.py
 임시 DB와 8765 포트를 사용하며 실제 차량 사이트를 조회하지 않습니다.
 """
-import tempfile, threading, time
+import logging, tempfile, threading, time
 from pathlib import Path
 from contextlib import closing
 import uvicorn
 import server
 from storage import history, dealers
 from playwright.sync_api import sync_playwright, expect
+from crawler.browser_fetch import BrowserFetcher
+from normalizer.schema import Listing
+
+class LocalPageAdapter:
+    """실제 브라우저 세션을 열되 사이트 대신 data: 페이지만 읽는 조회 어댑터."""
+    def __init__(self):
+        self.fetcher=BrowserFetcher()
+    def parse_detail(self,url):
+        if self.fetcher.get_html('data:text/html,<title>ok</title>') is None:
+            raise RuntimeError('브라우저 세션을 열지 못했습니다')
+        return Listing(listing_id='session-check',source='manual',url=url)
+
+class ServerErrors(logging.Handler):
+    def __init__(self):
+        super().__init__(logging.ERROR);self.messages=[]
+    def emit(self,record):
+        self.messages.append(record.getMessage())
 
 with tempfile.TemporaryDirectory() as directory:
     server.HISTORY_DB_PATH=Path(directory)/'history.db'
@@ -17,6 +34,7 @@ with tempfile.TemporaryDirectory() as directory:
         history.record(conn,sample['url'],source='encar',listing=sample)
         history.record(conn,'https://example.com/car2',source='kcar',listing={'source':'kcar','listing_id':'456','vehicle':{'make':'현대','model':'캐스퍼','model_year':2023,'price_krw':15000000},'dealer':{'dealer_id':'dealer-2','display_name':'테스트판매자B'}})
         history.record(conn,'https://example.com/failed',status='failed',reason='조회 실패')
+    server_errors=ServerErrors();logging.getLogger('uvicorn.error').addHandler(server_errors)
     service=uvicorn.Server(uvicorn.Config(server.app,host='127.0.0.1',port=8765,log_level='error'))
     thread=threading.Thread(target=service.run,daemon=True);thread.start()
     try:
@@ -136,8 +154,17 @@ with tempfile.TemporaryDirectory() as directory:
             expect(page.locator('#lookupMessage')).to_contain_text('일시적인 조회 실패')
             expect(page.get_by_role('button',name='차량 불러오기',exact=False)).to_be_enabled()
             page.unroute('**/api/lookup')
+            # 브라우저 세션은 조회마다 열고 닫는다: 사이트를 바꿔 이어서 조회해도, 동시에 조회해도 실패하지 않는다.
+            server._SOURCE_HOSTS={'first.example.com':('bobaedream',True),'second.example.com':('encar',True)}
+            server._ADAPTERS['bobaedream']=server._ADAPTERS['encar']=LocalPageAdapter
+            lookup_all="urls=>Promise.all(urls.map(url=>fetch('/api/lookup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url})}).then(r=>r.json())))"
+            for url in ('https://first.example.com/car','https://second.example.com/car','https://first.example.com/car'):
+                result=page.evaluate(lookup_all,[url])[0];assert result['ok'],result
+            results=page.evaluate(lookup_all,['https://first.example.com/car?no='+str(i) for i in range(4)])
+            assert all(result['ok'] for result in results),results
             assert not errors,errors
             browser.close()
-            print('PASS: vehicle favorites/search/sort, dealer favorites/add/blacklist/reload/unblock, blacklist gates verification, saved data preservation, same-tab navigation, manual entry, desktop and mobile, no JS errors')
     finally:
         service.should_exit=True;thread.join(timeout=5)
+    assert not thread.is_alive() and not server_errors.messages,server_errors.messages
+    print('PASS: vehicle favorites/search/sort, dealer favorites/add/blacklist/reload/unblock, blacklist gates verification, saved data preservation, same-tab navigation, manual entry, desktop and mobile, no JS errors, per-lookup browser sessions, clean shutdown')

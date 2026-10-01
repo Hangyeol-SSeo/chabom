@@ -43,7 +43,6 @@ from crawler.adapters.encar_detail_adapter import AUTH_STATE_PATH, EncarDetailAd
 from crawler.encar_session import EncarSessionManager
 from crawler.adapters.kbchachacha_adapter import KbchachachaAdapter
 from crawler.adapters.kcar_detail_adapter import KcarDetailAdapter
-from crawler.browser_fetch import BrowserFetcher
 from normalizer.schema import Listing
 from scoring.checklist import ChecklistResult, DealerStatus, evaluate_checklist
 from scoring.scorer import load_weights
@@ -61,7 +60,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_fetcher = BrowserFetcher()
 _encar_session = EncarSessionManager(AUTH_STATE_PATH)
 _weights = load_weights()
 DEALERS_DB_PATH = Path(__file__).parent / "data/dealers.db"
@@ -80,12 +78,15 @@ _SOURCE_HOSTS = {
     "encar.com": ("encar", True),
 }
 
+# 어댑터는 조회마다 새로 만들고, 각자 자기 브라우저 세션을 연다(_lookup에서 같은 스레드로 닫는다).
+# Playwright sync 세션은 만든 스레드에서만 쓰고 닫을 수 있고 한 스레드에 하나만 열 수 있어서,
+# 서버 전체가 세션 하나를 공유하면 요청 스레드가 바뀌거나 다른 사이트를 이어서 조회할 때 실패한다.
+# Encar는 로그인 상태 파일도 이렇게 조회마다 새 컨텍스트에 반영된다.
 _ADAPTERS = {
-    "bobaedream": lambda: BobaedreamAdapter(fetcher=_fetcher),
-    "kbchachacha": lambda: KbchachachaAdapter(fetcher=_fetcher),
-    "kcar": lambda: KcarDetailAdapter(fetcher=_fetcher),
-    # Encar 로그인 상태 파일은 조회마다 새 컨텍스트에 반영한다.
-    "encar": lambda: EncarDetailAdapter(),
+    "bobaedream": BobaedreamAdapter,
+    "kbchachacha": KbchachachaAdapter,
+    "kcar": KcarDetailAdapter,
+    "encar": EncarDetailAdapter,
 }
 
 
@@ -240,8 +241,10 @@ def _lookup(req: LookupRequest) -> dict:
         logger.warning("단건 조회 실패: %s (%s)", req.url, exc)
         return {"ok": False, "reason": f"조회에 실패했습니다: {exc}"}
     finally:
-        if source == "encar":
+        try:
             adapter.fetcher.close()
+        except Exception as exc:  # noqa: BLE001 — 세션 정리 실패가 조회 결과를 가리면 안 된다
+            logger.warning("브라우저 세션 정리 실패: %s", type(exc).__name__)
     return {"ok": True, "listing": listing.to_dict()}
 
 
@@ -405,7 +408,6 @@ def _result_to_dict(result: ChecklistResult, listing: Listing) -> dict:
 
 @app.on_event("shutdown")
 async def _shutdown() -> None:
-    _fetcher.close()
     await _encar_session.close()
 
 

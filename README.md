@@ -291,6 +291,7 @@ scoring/checklist.py       [웹앱 전용, 2026-09-18 신설] PASS/FAIL/미확�
 scoring/export.py          EvaluatedListing -> JSON 행 변환(CLI --json-out이 사용)
 crawler/base_adapter.py    어댑터 공통 인터페이스(SearchParams에 year_min/max, mileage_min/max_km 포함)
 crawler/browser_fetch.py   Playwright 실브라우저 공유 세션(HTML/JSON 요청 계층, warmup_url/post_wait_ms 지원)
+                            세션은 만든 스레드 전용 — 웹 서버는 조회마다 열고 같은 스레드에서 닫는다
 crawler/compliance.py      robots.txt 실측 기록 + 차단 로직
 crawler/rate_limiter.py    요청 간 딜레이(스펙 3.3, 어댑터별로 다르게 설정 가능)
 crawler/carhistory_client.py  CODEF 연동 스텁(스펙 4.2, 미구현)
