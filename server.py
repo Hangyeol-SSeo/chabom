@@ -179,10 +179,30 @@ def lookup(req: LookupRequest) -> dict:
     return result
 
 
+def _stored_check(dealer_conn, listing: Optional[dict]) -> Optional[dict]:
+    """저장된 매물을 그대로 판정한다 — 목록·상세에서 결격 사유를 누르지 않고 바로 보여주기 위함."""
+    if not listing:
+        return None
+    try:
+        parsed = Listing.from_dict({"listing_id": "manual", "source": "manual", **listing})
+        dealer_status = _build_dealer_status(dealer_conn, parsed, remember=False)
+        result = evaluate_checklist(parsed, dealer_status=dealer_status, weights=_weights)
+    except Exception as exc:  # noqa: BLE001 — 옛 형식의 저장본 하나 때문에 목록 전체가 막히면 안 된다
+        logger.info("저장된 매물 판정 실패: %s", type(exc).__name__)
+        return None
+    check = _result_to_dict(result, parsed)
+    del check["listing"], check["dealer_status"]
+    return check
+
+
 @app.get('/api/history')
 def get_history() -> dict:
     with closing(history_store.get_connection(HISTORY_DB_PATH)) as conn:
-        return {'items': history_store.list_history(conn)}
+        items = history_store.list_history(conn)
+    with closing(dealer_store.get_connection(DEALERS_DB_PATH)) as conn:
+        for item in items:
+            item['check'] = _stored_check(conn, item['listing'])
+    return {'items': items}
 
 
 class FavoriteRequest(BaseModel):
@@ -337,18 +357,21 @@ def favorite_dealer(req: DealerFavoriteRequest) -> dict:
     return {'ok': True, 'favorite': req.favorite}
 
 
-def _build_dealer_status(conn, listing: Listing) -> DealerStatus:
+def _build_dealer_status(conn, listing: Listing, remember: bool = True) -> DealerStatus:
+    """`remember=False`면 딜러를 새로 등록·갱신하지 않고 읽기만 한다(목록 조회용)."""
     source, dealer_key = listing.source, listing.dealer.dealer_id
     if not dealer_key:
         return DealerStatus(known=False)
     phone = dealer_store.normalize_phone(listing.dealer.phone)
-    dealer_store.upsert_dealer(conn, source, dealer_key, display_name=listing.dealer.display_name,
-                              phone=listing.dealer.phone, region=listing.dealer.region)
+    if remember:
+        dealer_store.upsert_dealer(conn, source, dealer_key, display_name=listing.dealer.display_name,
+                                  phone=listing.dealer.phone, region=listing.dealer.region)
     record = dealer_store.get_dealer(conn, source, dealer_key)
     phone_matches = dealer_store.find_by_phone(conn, phone, exclude=(source, dealer_key)) if phone else []
     if record is None:
         # 처음 보는 딜러면 이번 조회를 계기로 등록해둔다(블랙리스트 아님 — 나중에 조회/등록용 인덱스).
-        dealer_store.upsert_dealer(conn, source, dealer_key, phone=listing.dealer.phone, region=listing.dealer.region)
+        if remember:
+            dealer_store.upsert_dealer(conn, source, dealer_key, phone=listing.dealer.phone, region=listing.dealer.region)
         return DealerStatus(source=source, dealer_key=dealer_key, known=True, phone_matches=phone_matches)
     return DealerStatus(
         source=source, dealer_key=dealer_key, known=True,

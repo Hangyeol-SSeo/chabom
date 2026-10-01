@@ -132,6 +132,7 @@ class PerformanceRecord:
     inspection_results: dict[str, str] = field(default_factory=dict)
     record_url: str = ""
     record_available: bool = False
+    record_images: list[str] = field(default_factory=list)  # 기록부가 스캔 이미지로만 등록된 경우
     third_party_inspection: ThirdPartyInspection = field(default_factory=ThirdPartyInspection)
 
 
@@ -238,6 +239,7 @@ class Listing:
             inspection_results=pr.get("inspection_results", {}),
             record_url=pr.get("record_url", ""),
             record_available=pr.get("record_available", False),
+            record_images=pr.get("record_images", []),
             third_party_inspection=tpi,
         )
 
