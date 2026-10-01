@@ -25,7 +25,7 @@
   const shortDate = value => value ? new Date(value).toLocaleDateString('ko-KR',{year:'numeric',month:'2-digit',day:'2-digit'}) : '';
   const dealerKey = d => JSON.stringify([d.source,d.dealer_key]);
   const dealerName = d => d.display_name || '판매자 '+(d.dealer_key.length>12?d.dealer_key.slice(0,6)+'…'+d.dealer_key.slice(-4):d.dealer_key);
-  const state = {history:[],dealers:[],view:'garage',filter:'all',dealerFilter:'favorite',search:'',dealerSearch:'',sort:'recent',draft:null,historyId:null,result:null,lookupURL:'',lookupRunning:false,lookupMessage:'',lookupError:false,loading:true,related:null};
+  const state = {history:[],dealers:[],view:'garage',filter:'all',dealerFilter:'favorite',search:'',dealerSearch:'',sort:'recent',draft:null,historyId:null,result:null,lookupURL:'',lookupRunning:false,lookupMessage:'',lookupError:false,loading:true,related:null,encarSession:'none',encarSessionBusy:false};
   let toastTimer, dialogContext, loadRevision=0;
   function notify(message, error=false){
     clearTimeout(toastTimer); $('toast').textContent=message; $('toast').className='toast'+(error?' error':''); $('toast').hidden=false;
@@ -39,11 +39,12 @@
   }
   async function loadData(){
     const revision=++loadRevision;
-    const results=await Promise.allSettled([request('/api/history'),request('/api/dealers')]);
+    const results=await Promise.allSettled([request('/api/history'),request('/api/dealers'),request('/api/encar/session')]);
     if(revision!==loadRevision) return;
     const errors=[];
     if(results[0].status==='fulfilled') state.history=results[0].value.items; else errors.push('차량 목록을 불러오지 못했습니다.');
     if(results[1].status==='fulfilled') state.dealers=results[1].value.dealers; else errors.push('딜러 목록을 불러오지 못했습니다.');
+    if(results[2].status==='fulfilled' && state.encarSession!=='expired') state.encarSession=results[2].value.status;
     state.loading=false;
     $('connectionError').hidden=!errors.length;
     $('connectionError').innerHTML=esc(errors.join(' '))+' <button class="button small secondary" data-action="retry">다시 시도</button>';
@@ -83,6 +84,23 @@
   function heading(eyebrow,title,sub,action=''){return `<div class="page-heading"><div><h1>${title}</h1><p class="subtitle">${sub}</p></div>${action}</div>`;}
   function empty(title,description,button=''){return `<div class="empty"><div class="empty-icon">${icon('garage')}</div><h2>${title}</h2><p>${description}</p>${button}</div>`;}
   function newCarButton(){return `<a class="button primary" href="#lookup">${icon('plus')}매물 추가</a>`;}
+  function renderEncarConnection(){
+    const status=state.encarSession;
+    const message=status==='waiting'?'열린 엔카 창에서 직접 로그인한 뒤 여기서 완료를 확인해주세요.':status==='saved'?'차봄용 로그인 정보가 저장돼 있습니다. 새 엔카 매물을 조회할 때 자동으로 사용합니다.':status==='expired'?'저장된 엔카 로그인이 만료됐거나 확인되지 않았습니다. 다시 연결해주세요.':'엔카 보험 상세를 자동으로 가져오려면 로그인 창에서 한 번 연결해주세요.';
+    const actions=status==='waiting'?`<button class="button primary small" data-action="encar-login-complete" ${state.encarSessionBusy?'disabled':''}>로그인 완료 확인</button><button class="button secondary small" data-action="encar-login-cancel" ${state.encarSessionBusy?'disabled':''}>취소</button>`:`<button class="button secondary small" data-action="encar-login-start" ${state.encarSessionBusy?'disabled':''}>${state.encarSessionBusy?'창을 여는 중…':status==='saved'?'다시 로그인':'엔카 로그인 창 열기'}</button>`;
+    return `<section class="panel encar-connect"><div class="panel-heading"><h2>엔카 보험 상세 연결</h2><span class="pill ${status==='saved'?'green':status==='expired'?'amber':''}">${status==='saved'?'로그인 정보 저장됨':status==='waiting'?'로그인 대기 중':status==='expired'?'재연결 필요':'미연결'}</span></div><p class="form-note">${message}</p><div class="encar-connect-actions">${actions}${status==='saved'&&state.view==='detail'?'<button class="button primary small" data-action="reload-car">차량 다시 불러오기</button>':''}</div></section>`;
+  }
+  async function changeEncarSession(action){
+    if(state.encarSessionBusy)return;
+    state.encarSessionBusy=true;render();
+    try{
+      const data=await request(`/api/encar/session/${action}`,'POST',action==='complete'?{url:state.draft?.source==='encar'?state.draft.url:state.lookupURL}:{});
+      state.encarSession=data.status;
+      if(action==='complete')notify('엔카 로그인을 저장했습니다. 차량을 다시 불러오면 보험 상세가 반영됩니다.');
+      else if(action==='start')notify('열린 엔카 창에서 로그인해주세요.');
+    }catch(err){notify(err.message,true);}
+    finally{state.encarSessionBusy=false;render();}
+  }
   function render(){
     if(state.view==='garage') renderGarage();
     else if(state.view==='lookup') renderLookup();
@@ -122,7 +140,7 @@
       <button class="icon-button" data-action="favorite-car" data-id="${item.id}" aria-pressed="${item.favorite}" aria-label="${esc(titleOf(l))} ${item.favorite?'찜 해제':'찜하기'}">${icon('heart')}</button></article>`;
   }
   function renderLookup(){
-    $('main').innerHTML=heading('CHECK A CAR','매물 확인','마음에 드는 차량의 링크를 붙여넣어 주세요.')+`<div class="lookup-layout"><section class="panel lookup-panel"><h2>이 차, 조금 더 살펴볼까요?</h2><form id="lookupForm" class="lookup-form"><label class="field-label" for="lookupURL">매물 링크</label><div class="url-row"><input id="lookupURL" type="url" required placeholder="https://…" value="${esc(state.lookupURL)}"><button class="button primary" type="submit" ${state.lookupRunning?'disabled':''}>${state.lookupRunning?'불러오는 중…':'차량 불러오기'}${icon('arrow')}</button></div></form><div class="source-hints"><span>엔카</span><span>케이카</span><span>KB차차차</span><span>보배드림</span></div><div id="lookupMessage" class="inline-message${state.lookupError?' error':''}" role="status" ${!state.lookupMessage?'hidden':''}>${esc(state.lookupMessage)}</div><div class="manual-row"><span>링크가 없거나 불러오지 못하셨나요?</span><button class="button quiet small" data-action="manual">직접 입력${icon('arrow')}</button></div></section><div class="steps"><div><p class="number">01 / 불러오기</p><h3>차량 정보 확인</h3><p>가격과 기본 정보를<br>한곳에서 확인하세요.</p></div><div><p class="number">02 / 확인하기</p><h3>핵심 이력 체크</h3><p>기록부와 보험이력으로<br>빠진 항목을 채워보세요.</p></div><div><p class="number">03 / 보관하기</p><h3>마음에 들면 찜</h3><p>차량과 딜러를 저장해<br>다시 비교해보세요.</p></div></div></div>`;
+    $('main').innerHTML=heading('CHECK A CAR','매물 확인','마음에 드는 차량의 링크를 붙여넣어 주세요.')+`<div class="lookup-layout"><section class="panel lookup-panel"><h2>이 차, 조금 더 살펴볼까요?</h2><form id="lookupForm" class="lookup-form"><label class="field-label" for="lookupURL">매물 링크</label><div class="url-row"><input id="lookupURL" type="url" required placeholder="https://…" value="${esc(state.lookupURL)}"><button class="button primary" type="submit" ${state.lookupRunning?'disabled':''}>${state.lookupRunning?'불러오는 중…':'차량 불러오기'}${icon('arrow')}</button></div></form><div class="source-hints"><span>엔카</span><span>케이카</span><span>KB차차차</span><span>보배드림</span></div><div id="lookupMessage" class="inline-message${state.lookupError?' error':''}" role="status" ${!state.lookupMessage?'hidden':''}>${esc(state.lookupMessage)}</div><div class="manual-row"><span>링크가 없거나 불러오지 못하셨나요?</span><button class="button quiet small" data-action="manual">직접 입력${icon('arrow')}</button></div></section>${renderEncarConnection()}<div class="steps"><div><p class="number">01 / 불러오기</p><h3>차량 정보 확인</h3><p>가격과 기본 정보를<br>한곳에서 확인하세요.</p></div><div><p class="number">02 / 확인하기</p><h3>핵심 이력 체크</h3><p>기록부와 보험이력으로<br>빠진 항목을 채워보세요.</p></div><div><p class="number">03 / 보관하기</p><h3>마음에 들면 찜</h3><p>차량과 딜러를 저장해<br>다시 비교해보세요.</p></div></div></div>`;
   }
   async function lookup(url){
     if(state.lookupRunning)return;
@@ -133,6 +151,7 @@
       await loadData();
       if(!response.ok||!data.ok)throw new Error(typeof data.detail==='string'?data.detail:data.reason||'차량 정보를 불러오지 못했습니다.');
       state.lookupMessage='';
+      if(data.listing?.source==='encar' && data.listing.insurance_history?.history_detail_status==='login_required') state.encarSession='expired';
       if(state.view==='lookup')openListing(data.listing,data.history_id,url);
       else notify('차량을 보관함에 저장했습니다.');
     }catch(err){state.lookupError=true;state.lookupMessage=err.message;}
@@ -146,24 +165,48 @@
     return `<div><label class="field-label" for="${id}">${label}</label><input id="${id}" name="${id}" type="${type}" value="${esc(value??'')}" ${type==='number'?'min="0"':''} ${extra}></div>`;
   }
   const checks=[['frame_ok','프레임 손상','무손상 확인','손상 있음',true],['flood_damage','침수 이력','없음 확인','있음',false],['total_loss','전손 이력','없음 확인','있음',false],['theft','도난 이력','없음 확인','있음',false],['history_disclosed','보험이력 조회','조회 가능','비공개 / 거부',true]];
+  const countLabel = value => value == null ? '미확인' : `${value}건`;
+  const amountLabel = (count,amount) => count == null ? '미확인' : count===0 ? '없음' : `${count}건 · ${amount == null ? '금액 미확인' : amount.toLocaleString('ko-KR')+'원'}`;
+  function renderHistoryDetails(l){
+    const ih=l.insurance_history||{},events=ih.history_events||[],warnings=Object.entries(ih.history_warnings||{});
+    const detailReady=ih.history_detail_status==='available';
+    const historyLink=(l.verification_links||[]).find(link=>link.label.includes('상세 이력'))?.url;
+    const message=detailReady?'엔카의 상세 이력 화면에서 확인한 내용입니다.':ih.history_detail_status==='login_required'?'차봄에 엔카 로그인을 연결한 뒤 차량을 다시 불러오면 상세 이력을 확인할 수 있습니다.':'상세 이력을 가져오지 못했습니다. 엔카 원문에서 소유자·번호·용도 변경과 미가입 기간을 확인해주세요.';
+    return `<section class="panel evidence-panel"><div class="panel-heading"><h2>보험·차량 상세 이력</h2>${safeURL(historyLink)?`<a class="row-link" href="${esc(safeURL(historyLink))}" target="_blank" rel="noopener noreferrer">엔카 원문${icon('arrow')}</a>`:''}</div>
+      <p class="form-note">${esc(message)}</p>
+      <div class="evidence-metrics"><div><span>소유자 변경</span><strong>${countLabel(ih.owner_change_count)}</strong></div><div><span>번호 변경</span><strong>${countLabel(ih.number_change_count)}</strong></div><div><span>용도 변경</span><strong>${countLabel(ih.usage_change_count)}</strong></div></div>
+      <div class="evidence-metrics"><div><span>내차 피해</span><strong>${esc(amountLabel(ih.own_damage_count,ih.own_damage_total_krw))}</strong></div><div><span>타차 가해</span><strong>${esc(amountLabel(ih.other_party_damage_count,ih.other_party_damage_total_krw))}</strong></div></div>
+      ${warnings.length?`<div class="evidence-block"><h3>주의 이력과 정보 공백</h3><dl class="evidence-pairs">${warnings.map(([key,value])=>`<div><dt>${esc(key)}</dt><dd>${esc(value)}</dd></div>`).join('')}</dl></div>`:'<p class="evidence-empty">자차 보험 미가입·전손·침수·도난·영업용 여부는 상세 화면에서 확인이 필요합니다.</p>'}
+      ${events.length?`<div class="evidence-block"><h3>변경 및 차량 이력 ${events.length}건</h3><ol class="history-events">${events.map(event=>`<li><time>${esc(event.date||'날짜 미확인')}</time><div><strong>${esc(event.category)}</strong>${event.summary?`<p>${esc(event.summary)}</p>`:''}${Object.keys(event.details||{}).length?`<dl>${Object.entries(event.details).map(([key,value])=>`<div><dt>${esc(key)}</dt><dd>${esc(value)}</dd></div>`).join('')}</dl>`:''}</div></li>`).join('')}</ol></div>`:''}
+    </section>`;
+  }
+  function renderPerformanceDetails(l){
+    const pr=l.performance_record||{},frame=pr.third_party_inspection?.frame_ok,results=Object.entries(pr.inspection_results||{});
+    return `<section class="panel evidence-panel"><div class="panel-heading"><h2>성능·상태 점검기록부</h2>${safeURL(pr.record_url)?`<a class="row-link" href="${esc(safeURL(pr.record_url))}" target="_blank" rel="noopener noreferrer">기록부 원본${icon('arrow')}</a>`:''}</div>
+      <p class="form-note">${pr.record_available?'엔카에 등록된 점검기록부에서 확인한 내용입니다.':'점검기록부의 부위별 결과를 가져오지 못했습니다. 원본을 확인해주세요.'}</p>
+      <div class="evidence-metrics"><div><span>주요골격</span><strong>${frame===true?'손상 없음':frame===false?'손상 확인':'미확인'}</strong></div><div><span>외판 교환</span><strong>${pr.record_available?countLabel((pr.panel_exchange||[]).length):'미확인'}</strong></div></div>
+      ${[['주요골격 손상',pr.frame_damage],['외판 교환',pr.panel_exchange],['외판 기타 수리',pr.panel_repairs],['누유·누수',pr.leak_records]].filter(([,items])=>items?.length).map(([label,items])=>`<div class="evidence-block"><h3>${label}</h3><ul class="evidence-list">${items.map(item=>`<li>${esc(item)}</li>`).join('')}</ul></div>`).join('')}
+      ${results.length?`<details class="inspection-details"><summary>성능 세부 점검 ${results.length}항목 보기</summary><dl class="evidence-pairs">${results.map(([key,value])=>`<div><dt>${esc(key)}</dt><dd>${esc(value)}</dd></div>`).join('')}</dl></details>`:''}
+    </section>`;
+  }
   function renderDetail(){
     const l=state.draft;if(!l){setView('lookup');return;}
     const v=l.vehicle||{},d=l.dealer||{},ih=l.insurance_history||{};
     const item=state.history.find(i=>i.id===state.historyId);
     $('main').innerHTML=`<button class="back-link" data-action="back">${icon('back')}차량 보관함</button><div class="detail-title"><div><div class="pills"><span class="pill">${esc(sourceName(l.source))}</span>${item?`<span class="pill">${esc(shortDate(item.last_viewed_at))} 저장</span>`:''}</div><h1>${esc(titleOf(l)==='차량 정보 미확인'?'차량 정보 확인':titleOf(l))}</h1><p class="subtitle">${item?'저장된 정보를 확인하고 필요한 항목을 보완하세요.':'차량 정보와 핵심 이력을 확인해주세요.'}</p></div>${item?`<button class="icon-button" data-action="favorite-car" data-id="${item.id}" aria-pressed="${item.favorite}" aria-label="${item.favorite?'매물 찜 해제':'매물 찜하기'}">${icon('heart')}</button>`:''}</div>
       ${item?.status==='failed'?'<p class="inline-message error">최근 조회에 실패했습니다. 이전 저장 정보를 확인하거나 직접 입력해주세요.</p>':''}
-      <div class="detail-layout"><div><div id="verificationResult" tabindex="-1"></div><form id="vehicleForm">
+      <div class="detail-layout"><div><div id="verificationResult" tabindex="-1"></div>${l.source==='encar'?(ih.history_detail_status==='login_required'?renderEncarConnection():'')+renderHistoryDetails(l)+renderPerformanceDetails(l):''}<form id="vehicleForm">
       <section class="panel"><div class="panel-heading"><h2><span class="step-number">01</span>차량 정보</h2>${safeURL(l.url)?`<a class="row-link" href="${esc(safeURL(l.url))}" target="_blank" rel="noopener noreferrer">원문 보기${icon('arrow')}</a>`:''}</div>
       <div class="form-grid three">${field('make','제조사',v.make)}${field('model','모델',v.model)}${field('trim','트림',v.trim)}</div><div class="form-grid three">${field('year','연식',v.model_year,'number','max="2100"')}${field('mileage','주행거리 · km',v.mileage_km,'number')}${field('price','가격 · 만원',v.price_krw!=null?v.price_krw/10000:'','number','step="0.01"')}</div></section>
-      <section class="panel"><div class="panel-heading"><h2><span class="step-number">02</span>핵심 이력</h2><span class="pill green" id="checkProgress"></span></div><p class="form-note" style="margin-bottom:20px">기록부에서 확인한 항목만 선택해주세요. 미확인 항목은 구매 보류로 처리됩니다.</p><div>${checks.map(([key,label,good,bad,goodValue])=>{const value=key==='frame_ok'?l.performance_record?.third_party_inspection?.frame_ok:ih[key];return `<fieldset class="check-row"><legend>${label}</legend><div class="tri">${[[goodValue,good],[!goodValue,bad],[null,'미확인']].map(([val,text])=>`<label><input type="radio" name="${key}" value="${val}" ${(value??null)===val?'checked':''}><span>${text}</span></label>`).join('')}</div>${key==='history_disclosed'?`<label class="check-extra"><input type="checkbox" id="infoGap" ${ih.info_unavailable_periods?.length?'checked':''}>조회되지 않는 기간이 있었음</label>`:''}</fieldset>`;}).join('')}</div></section>
-      <details class="panel details-panel"><summary>추가 정보 · 딜러 정보 수정</summary><div class="details-content"><div class="form-grid">${field('region','차량 지역',v.region)}${field('ownerChange','명의변경 횟수',ih.owner_change_count??0,'number')}<div><label class="field-label" for="accident">판매자 사고 고지</label><select id="accident"><option value="">모름 / 없음</option><option value="사고있음" ${(l.listing_text?.claims_parsed||[]).includes('사고있음')?'selected':''}>사고 있음</option></select></div><div><label class="field-label" for="source">사이트</label><select id="source">${Object.entries(sources).map(([key,label])=>`<option value="${key}" ${key===l.source?'selected':''}>${label}</option>`).join('')}</select></div>${field('listingURL','매물 링크',l.url,'url')}${field('dealerName','딜러 이름',d.display_name)}${field('dealerId','사이트별 딜러 ID',d.dealer_id)}${field('dealerPhone','연락처',d.phone,'tel')}${field('dealerRegion','딜러 지역',d.region)}</div></div></details>
+      <section class="panel"><div class="panel-heading"><h2><span class="step-number">02</span>핵심 이력 확인</h2><span class="pill green" id="checkProgress"></span></div><p class="form-note" style="margin-bottom:20px">원본에서 확인한 항목만 선택해주세요. 미확인 항목은 구매 보류로 처리됩니다.</p><div>${checks.map(([key,label,good,bad,goodValue])=>{const value=key==='frame_ok'?l.performance_record?.third_party_inspection?.frame_ok:ih[key];return `<fieldset class="check-row"><legend>${label}</legend><div class="tri">${[[goodValue,good],[!goodValue,bad],[null,'미확인']].map(([val,text])=>`<label><input type="radio" name="${key}" value="${val}" ${(value??null)===val?'checked':''}><span>${text}</span></label>`).join('')}</div>${key==='history_disclosed'?`<label class="check-extra"><input type="checkbox" id="coverageVerified" ${ih.coverage_verified?'checked':''}>상세 화면에서 자차보험 미가입 기간 여부 확인</label><label class="check-extra"><input type="checkbox" id="infoGap" ${ih.info_unavailable_periods?.length?'checked':''}>조회되지 않는 기간이 있었음</label>`:''}</fieldset>`;}).join('')}</div></section>
+      <details class="panel details-panel"><summary>추가 정보 · 딜러 정보 수정</summary><div class="details-content"><div class="form-grid">${field('region','차량 지역',v.region)}${field('ownerChange','명의변경 횟수',ih.owner_change_count,'number')}<div><label class="field-label" for="accident">판매자 사고 고지</label><select id="accident"><option value="">모름 / 없음</option><option value="사고있음" ${(l.listing_text?.claims_parsed||[]).includes('사고있음')?'selected':''}>사고 있음</option></select></div><div><label class="field-label" for="source">사이트</label><select id="source">${Object.entries(sources).map(([key,label])=>`<option value="${key}" ${key===l.source?'selected':''}>${label}</option>`).join('')}</select></div>${field('listingURL','매물 링크',l.url,'url')}${field('dealerName','딜러 이름',d.display_name)}${field('dealerId','사이트별 딜러 ID',d.dealer_id)}${field('dealerPhone','연락처',d.phone,'tel')}${field('dealerRegion','딜러 지역',d.region)}</div></div></details>
       <div class="form-footer"><p class="form-note">입력한 내용은 검증 시 저장됩니다.</p><button class="button primary" id="verifyButton" type="submit">저장하고 검증하기${icon('arrow')}</button></div><p id="verifyError" class="error-text" role="alert"></p></form></div><aside class="detail-aside"><div id="detailDealer"></div><section class="panel"><div class="panel-heading"><h2>확인할 자료</h2></div><div class="source-links">${renderSourceLinks(l)}</div>${safeURL(l.url)?'<button class="button secondary full" style="margin-top:22px" data-action="reload-car">최신 정보 다시 불러오기</button>':''}</section></aside></div>`;
     renderDetailDealer();updateProgress();renderResult();
   }
   function renderSourceLinks(l){
     const links=(l.verification_links||[]).filter(link=>safeURL(link.url));
     if(!links.length&&safeURL(l.url))links.push({label:'매물 원문 · 성능기록부',url:l.url});
-    return links.length?links.map(link=>`<a href="${esc(safeURL(link.url))}" target="_blank" rel="noopener noreferrer">${esc(link.label)}${icon('arrow')}</a>`).join(''):'<p class="form-note">판매자에게 성능기록부와 보험이력을 요청해주세요.</p>';
+    return links.length?links.map(link=>`<a href="${esc(safeURL(link.url))}" target="_blank" rel="noopener noreferrer"><span>${esc(link.label)}${link.note?`<small>${esc(link.note)}</small>`:''}</span>${icon('arrow')}</a>`).join(''):'<p class="form-note">판매자에게 성능기록부와 보험이력을 요청해주세요.</p>';
   }
   function updateProgress(){
     if(!$('checkProgress'))return;
@@ -175,7 +218,7 @@
     listing.listing_id=listing.listing_id||'manual-'+Date.now();listing.source=$('source').value;listing.url=$('listingURL').value.trim();
     listing.vehicle={...listing.vehicle,make:$('make').value.trim(),model:$('model').value.trim(),trim:$('trim').value.trim(),model_year:number('year'),mileage_km:number('mileage'),price_krw:number('price')===null?null:Math.round(number('price')*10000),region:$('region').value.trim()};
     listing.dealer={...listing.dealer,dealer_id:$('dealerId').value.trim(),display_name:$('dealerName').value.trim(),phone:$('dealerPhone').value.trim(),region:$('dealerRegion').value.trim()};
-    listing.insurance_history={...listing.insurance_history,owner_change_count:number('ownerChange')??0};
+    listing.insurance_history={...listing.insurance_history,owner_change_count:number('ownerChange'),coverage_verified:$('coverageVerified').checked};
     listing.performance_record={...listing.performance_record,third_party_inspection:{...listing.performance_record?.third_party_inspection}};
     for(const [key] of checks){const value=JSON.parse(document.querySelector(`input[name="${key}"]:checked`).value);if(key==='frame_ok')listing.performance_record.third_party_inspection.frame_ok=value;else listing.insurance_history[key]=value;}
     listing.insurance_history.info_unavailable_periods=$('infoGap').checked?(listing.insurance_history.info_unavailable_periods?.length?listing.insurance_history.info_unavailable_periods:[{start:null,end:null}]):[];
@@ -275,6 +318,9 @@
       case 'edit-verification':state.result=null;renderResult();$('model').focus();break;
       case 'manual':openListing({},null,state.lookupURL);break;
       case 'reload-car':state.lookupURL=state.draft.url;state.lookupMessage='';setView('lookup');lookup(state.lookupURL);break;
+      case 'encar-login-start':await changeEncarSession('start');break;
+      case 'encar-login-complete':await changeEncarSession('complete');break;
+      case 'encar-login-cancel':await changeEncarSession('cancel');break;
       case 'dealer-filter':state.dealerFilter=button.dataset.value;renderDealers();break;
       case 'favorite-dealer':await favoriteDealer(button);break;
       case 'block-dealer':openDealerDialog(findDealer(button));break;

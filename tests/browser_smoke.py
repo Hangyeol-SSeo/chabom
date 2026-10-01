@@ -12,7 +12,7 @@ from playwright.sync_api import sync_playwright, expect
 with tempfile.TemporaryDirectory() as directory:
     server.HISTORY_DB_PATH=Path(directory)/'history.db'
     server.DEALERS_DB_PATH=Path(directory)/'dealers.db'
-    sample={'source':'encar','listing_id':'123','url':'https://example.com/car','vehicle':{'make':'기아','model':'더 뉴 모닝','model_year':2021,'mileage_km':32000,'price_krw':8900000,'region':'서울'},'dealer':{'dealer_id':'dealer-1','display_name':'테스트판매자A','phone':'01000000000','region':'서울 강남'},'insurance_history':{'own_damage_claims':[{'amount_krw':5000000}]}}
+    sample={'source':'encar','listing_id':'123','url':'https://example.com/car','vehicle':{'make':'기아','model':'더 뉴 모닝','model_year':2021,'mileage_km':32000,'price_krw':8900000,'region':'서울'},'dealer':{'dealer_id':'dealer-1','display_name':'테스트판매자A','phone':'01000000000','region':'서울 강남'},'insurance_history':{'own_damage_claims':[{'amount_krw':5000000}],'owner_change_count':1,'number_change_count':1,'usage_change_count':1,'history_detail_status':'available','coverage_verified':True,'history_warnings':{'자차 보험 미가입 기간':'없음'},'history_events':[{'category':'소유자변경','date':'2021-03-14','summary':'당사자 거래이전','details':{'변경일자':'2021년 03월 14일'}},{'category':'차량번호변경','date':'2022-07-01','summary':'번호 변경','details':{}}]},'performance_record':{'record_available':True,'record_url':'https://example.com/record/123','panel_exchange':['프론트 휀더(우) · 교환'],'third_party_inspection':{'frame_ok':True}}}
     with closing(history.get_connection(server.HISTORY_DB_PATH)) as conn:
         history.record(conn,sample['url'],source='encar',listing=sample)
         history.record(conn,'https://example.com/car2',source='kcar',listing={'source':'kcar','listing_id':'456','vehicle':{'make':'현대','model':'캐스퍼','model_year':2023,'price_krw':15000000},'dealer':{'dealer_id':'dealer-2','display_name':'테스트판매자B'}})
@@ -27,8 +27,24 @@ with tempfile.TemporaryDirectory() as directory:
             browser=p.chromium.launch()
             page=browser.new_page(viewport={'width':1440,'height':1050})
             errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
+            auth={'status':'none'}
+            def mock_encar_session(route):
+                suffix=route.request.url.rsplit('/',1)[-1]
+                if suffix=='start':auth['status']='waiting'
+                elif suffix=='complete':auth['status']='saved'
+                elif suffix=='cancel':auth['status']='none'
+                route.fulfill(status=200,content_type='application/json',body='{"status":"'+auth['status']+'"}')
+            page.route('**/api/encar/session',mock_encar_session)
+            page.route('**/api/encar/session/**',mock_encar_session)
             page.goto('http://127.0.0.1:8765')
             expect(page.locator('.car-row')).to_have_count(3)
+            page.get_by_role('link',name='매물 확인',exact=True).click()
+            expect(page.get_by_role('heading',name='엔카 보험 상세 연결')).to_be_visible()
+            page.get_by_role('button',name='엔카 로그인 창 열기').click()
+            expect(page.get_by_text('로그인 대기 중')).to_be_visible()
+            page.get_by_role('button',name='로그인 완료 확인').click()
+            expect(page.get_by_text('로그인 정보 저장됨')).to_be_visible()
+            page.get_by_role('link',name='차량 보관함',exact=False).last.click()
             page.get_by_role('button',name='기아 더 뉴 모닝 찜하기',exact=True).click()
             page.get_by_role('button',name='찜한 매물1',exact=True).click()
             expect(page.locator('.car-row')).to_have_count(1)
@@ -39,6 +55,9 @@ with tempfile.TemporaryDirectory() as directory:
             expect(page.locator('.car-title').first).to_have_text('현대 캐스퍼')
             page.screenshot(path='/tmp/chabom-garage-desktop.png',full_page=True)
             page.get_by_role('button',name='기아 더 뉴 모닝',exact=True).click()
+            expect(page.get_by_role('heading',name='보험·차량 상세 이력')).to_be_visible()
+            expect(page.get_by_text('2021-03-14')).to_be_visible()
+            expect(page.get_by_text('프론트 휀더(우) · 교환')).to_be_visible()
             page.get_by_role('button',name='딜러 찜하기',exact=True).click()
             expect(page.get_by_role('button',name='찜 해제',exact=True)).to_be_visible()
             page.get_by_role('link',name='딜러 관리',exact=False).click()

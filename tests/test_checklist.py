@@ -107,6 +107,17 @@ def test_history_disclosed_unknown_forces_hold():
     assert item(result, "insurance_history").verdict == "unknown"
 
 
+def test_encar_summary_without_coverage_confirmation_forces_hold():
+    listing = clean_listing()
+    listing.source = "encar"
+    listing.insurance_history.coverage_verified = False
+    listing.insurance_history.owner_change_count = None
+    result = evaluate_checklist(listing, weights=WEIGHTS)
+    assert item(result, "insurance_history").verdict == "unknown"
+    assert item(result, "owner_change").verdict == "unknown"
+    assert result.overall == "hold"
+
+
 def test_info_gap_fails_even_when_disclosed():
     from normalizer.schema import InfoUnavailablePeriod
 

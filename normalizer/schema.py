@@ -50,6 +50,14 @@ class OwnerChangeLogEntry:
 
 
 @dataclass
+class HistoryEvent:
+    category: str = ""
+    date: str = ""  # 원문이 월까지만 제공되면 YYYY-MM, 일자까지 제공되면 YYYY-MM-DD
+    summary: str = ""
+    details: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class DamageClaim:
     date: Optional[str] = None
     amount_krw: int = 0
@@ -83,8 +91,18 @@ class UsageHistory:
 @dataclass
 class InsuranceHistory:
     usage_history: UsageHistory = field(default_factory=UsageHistory)
-    owner_change_count: int = 0
+    owner_change_count: Optional[int] = 0
     owner_change_log: list[OwnerChangeLogEntry] = field(default_factory=list)
+    number_change_count: Optional[int] = None
+    usage_change_count: Optional[int] = None
+    history_events: list[HistoryEvent] = field(default_factory=list)
+    history_warnings: dict[str, str] = field(default_factory=dict)
+    history_detail_status: str = "unavailable"  # available | login_required | unavailable
+    coverage_verified: bool = False
+    own_damage_count: Optional[int] = None
+    own_damage_total_krw: Optional[int] = None
+    other_party_damage_count: Optional[int] = None
+    other_party_damage_total_krw: Optional[int] = None
     own_damage_claims: list[DamageClaim] = field(default_factory=list)
     other_party_damage_claims: list[OtherPartyDamageClaim] = field(default_factory=list)
     info_unavailable_periods: list[InfoUnavailablePeriod] = field(default_factory=list)
@@ -108,8 +126,12 @@ class ThirdPartyInspection:
 @dataclass
 class PerformanceRecord:
     panel_exchange: list[str] = field(default_factory=list)
+    panel_repairs: list[str] = field(default_factory=list)
     frame_damage: list[str] = field(default_factory=list)
     leak_records: list[str] = field(default_factory=list)
+    inspection_results: dict[str, str] = field(default_factory=dict)
+    record_url: str = ""
+    record_available: bool = False
     third_party_inspection: ThirdPartyInspection = field(default_factory=ThirdPartyInspection)
 
 
@@ -179,6 +201,7 @@ class Listing:
         ih = data.get("insurance_history", {}) or {}
         usage = UsageHistory(**ih.get("usage_history", {}))
         owner_log = [OwnerChangeLogEntry(**e) for e in ih.get("owner_change_log", [])]
+        events = [HistoryEvent(**e) for e in ih.get("history_events", [])]
         own_claims = [DamageClaim(**c) for c in ih.get("own_damage_claims", [])]
         other_claims = [OtherPartyDamageClaim(**c) for c in ih.get("other_party_damage_claims", [])]
         unavailable = [InfoUnavailablePeriod(**p) for p in ih.get("info_unavailable_periods", [])]
@@ -186,6 +209,16 @@ class Listing:
             usage_history=usage,
             owner_change_count=ih.get("owner_change_count", 0),
             owner_change_log=owner_log,
+            number_change_count=ih.get("number_change_count"),
+            usage_change_count=ih.get("usage_change_count"),
+            history_events=events,
+            history_warnings=ih.get("history_warnings", {}),
+            history_detail_status=ih.get("history_detail_status", "unavailable"),
+            coverage_verified=ih.get("coverage_verified", False),
+            own_damage_count=ih.get("own_damage_count"),
+            own_damage_total_krw=ih.get("own_damage_total_krw"),
+            other_party_damage_count=ih.get("other_party_damage_count"),
+            other_party_damage_total_krw=ih.get("other_party_damage_total_krw"),
             own_damage_claims=own_claims,
             other_party_damage_claims=other_claims,
             info_unavailable_periods=unavailable,
@@ -199,8 +232,12 @@ class Listing:
         tpi = ThirdPartyInspection(**pr.get("third_party_inspection", {}))
         performance_record = PerformanceRecord(
             panel_exchange=pr.get("panel_exchange", []),
+            panel_repairs=pr.get("panel_repairs", []),
             frame_damage=pr.get("frame_damage", []),
             leak_records=pr.get("leak_records", []),
+            inspection_results=pr.get("inspection_results", {}),
+            record_url=pr.get("record_url", ""),
+            record_available=pr.get("record_available", False),
             third_party_inspection=tpi,
         )
 

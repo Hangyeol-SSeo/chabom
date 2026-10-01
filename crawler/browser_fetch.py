@@ -13,6 +13,7 @@ User-Agent 위장이나 자동화 감지 회피 스크립트는 넣지 않는다
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -26,8 +27,9 @@ _DEFAULT_USER_AGENT = (
 class BrowserFetcher:
     """헤드리스 Chromium 세션 하나를 여러 어댑터/요청이 공유하는 래퍼."""
 
-    def __init__(self, headless: bool = True):
+    def __init__(self, headless: bool = True, storage_state: Optional[Path] = None):
         self._headless = headless
+        self._storage_state = storage_state
         self._pw = None
         self._browser = None
         self._context = None
@@ -41,10 +43,10 @@ class BrowserFetcher:
 
         self._pw = sync_playwright().start()
         self._browser = self._pw.chromium.launch(headless=self._headless)
-        self._context = self._browser.new_context(
-            user_agent=_DEFAULT_USER_AGENT,
-            locale="ko-KR",
-        )
+        options = {"user_agent": _DEFAULT_USER_AGENT, "locale": "ko-KR"}
+        if self._storage_state and self._storage_state.exists():
+            options["storage_state"] = str(self._storage_state)
+        self._context = self._browser.new_context(**options)
 
     def get_html(
         self,

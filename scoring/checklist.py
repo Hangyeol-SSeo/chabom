@@ -124,10 +124,17 @@ def _insurance_history_item(listing: Listing) -> ChecklistItem:
         total_days = sum(
             (p.end and p.start and _days_between(p.start, p.end)) or 0 for p in ih.info_unavailable_periods
         )
+        gap_length = f"약 {total_days}일" if total_days else "기간 미확인"
         return ChecklistItem(
             "insurance_history", "보험이력 조회", "fail",
-            f"이력 조회는 가능하나 정보 공백 기간이 있습니다(약 {total_days}일) — 자차보험 미가입 기간 동안의 "
+            f"이력 조회는 가능하나 정보 공백 기간이 있습니다({gap_length}) — 자차보험 미가입 기간 동안의 "
             "사고 이력이 누락됐을 수 있습니다",
+            critical=True,
+        )
+    if not ih.coverage_verified and listing.source == "encar":
+        return ChecklistItem(
+            "insurance_history", "보험이력 조회", "unknown",
+            "차량이력 요약만으로는 자차 보험 미가입 기간이 없다고 확인할 수 없습니다 — 상세 이력 확인 필요",
             critical=True,
         )
     return ChecklistItem("insurance_history", "보험이력 조회", "pass", "이력 조회 가능, 공백 기간 없음", critical=True)
@@ -163,11 +170,14 @@ def _informational_items(listing: Listing) -> list[ChecklistItem]:
             critical=True,  # 사용자가 일반 매매를 찾고 있다면 이것도 사실상 치명적 — 게이팅
         ))
 
-    items.append(ChecklistItem(
-        "owner_change", "명의변경 이력", "pass" if ih.owner_change_count <= 1 else "fail",
-        f"명의변경 {ih.owner_change_count}회" + ("(단독 소유 추정)" if ih.owner_change_count <= 1 else ""),
-        critical=False,
-    ))
+    if ih.owner_change_count is None:
+        items.append(ChecklistItem("owner_change", "명의변경 이력", "unknown", "소유자 변경 횟수와 날짜가 확인되지 않았습니다", critical=False))
+    else:
+        items.append(ChecklistItem(
+            "owner_change", "명의변경 이력", "pass" if ih.owner_change_count <= 1 else "fail",
+            f"명의변경 {ih.owner_change_count}회" + ("(단독 소유 추정)" if ih.owner_change_count <= 1 else ""),
+            critical=False,
+        ))
 
     if ih.usage_history.any_commercial_use():
         kinds = ", ".join(k for k, used in [("렌트", ih.usage_history.rental_used), ("택시", ih.usage_history.taxi_used), ("영업용", ih.usage_history.business_used)] if used)

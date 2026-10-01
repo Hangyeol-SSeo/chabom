@@ -27,10 +27,11 @@ PASS/FAIL/미확인 체크리스트이며, 성능기록부·보험이력처럼 �
 from __future__ import annotations
 
 import logging
+import re
 from typing import Optional
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from contextlib import closing
 from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,7 +39,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from crawler.adapters.bobaedream_adapter import BobaedreamAdapter
-from crawler.adapters.encar_detail_adapter import EncarDetailAdapter
+from crawler.adapters.encar_detail_adapter import AUTH_STATE_PATH, EncarDetailAdapter
+from crawler.encar_session import EncarSessionManager
 from crawler.adapters.kbchachacha_adapter import KbchachachaAdapter
 from crawler.adapters.kcar_detail_adapter import KcarDetailAdapter
 from crawler.browser_fetch import BrowserFetcher
@@ -60,6 +62,7 @@ app.add_middleware(
 )
 
 _fetcher = BrowserFetcher()
+_encar_session = EncarSessionManager(AUTH_STATE_PATH)
 _weights = load_weights()
 DEALERS_DB_PATH = Path(__file__).parent / "data/dealers.db"
 HISTORY_DB_PATH = Path(__file__).parent / "data/listings.db"
@@ -81,7 +84,8 @@ _ADAPTERS = {
     "bobaedream": lambda: BobaedreamAdapter(fetcher=_fetcher),
     "kbchachacha": lambda: KbchachachaAdapter(fetcher=_fetcher),
     "kcar": lambda: KcarDetailAdapter(fetcher=_fetcher),
-    "encar": lambda: EncarDetailAdapter(fetcher=_fetcher),
+    # Encar 로그인 상태 파일은 조회마다 새 컨텍스트에 반영한다.
+    "encar": lambda: EncarDetailAdapter(),
 }
 
 
@@ -95,6 +99,63 @@ def _identify_source(url: str) -> tuple[Optional[str], bool]:
 
 class LookupRequest(BaseModel):
     url: str
+
+
+class EncarSessionCompleteRequest(BaseModel):
+    url: str = ""
+
+
+def _encar_history_probe_url(url: str) -> str:
+    candidates = [url] if url else []
+    if not candidates:
+        with closing(history_store.get_connection(HISTORY_DB_PATH)) as conn:
+            candidates = [item.get("url", "") for item in history_store.list_history(conn) if item.get("source") == "encar"]
+    for candidate in candidates:
+        parsed = urlparse(candidate)
+        match = re.fullmatch(r"/cars/detail/(\d+)", parsed.path)
+        if parsed.scheme == "https" and parsed.hostname == "fem.encar.com" and match:
+            return f"https://car.encar.com/history?carId={match.group(1)}"
+    raise HTTPException(status_code=422, detail="로그인을 확인할 엔카 매물 링크가 필요합니다.")
+
+
+def _require_local_json(request: Request) -> None:
+    origin = request.headers.get("origin")
+    expected_origin = f"{request.url.scheme}://{request.url.netloc}"
+    if request.url.hostname not in {"127.0.0.1", "localhost"} or (origin and origin != expected_origin):
+        raise HTTPException(status_code=403, detail="로컬 차봄 화면에서만 로그인 연결을 시작할 수 있습니다.")
+    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+        raise HTTPException(status_code=415, detail="JSON 요청이 필요합니다.")
+
+
+@app.get("/api/encar/session")
+def encar_session_status() -> dict:
+    return {"status": _encar_session.status()}
+
+
+@app.post("/api/encar/session/start")
+async def encar_session_start(request: Request) -> dict:
+    _require_local_json(request)
+    try:
+        return {"status": await _encar_session.start()}
+    except Exception as exc:
+        logger.warning("Encar 로그인 창 열기 실패: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="엔카 로그인 창을 열지 못했습니다. 브라우저 실행 상태를 확인해주세요.") from None
+
+
+@app.post("/api/encar/session/complete")
+async def encar_session_complete(request: Request, req: EncarSessionCompleteRequest) -> dict:
+    _require_local_json(request)
+    history_url = _encar_history_probe_url(req.url)
+    try:
+        return {"status": await _encar_session.complete(history_url)}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+
+
+@app.post("/api/encar/session/cancel")
+async def encar_session_cancel(request: Request) -> dict:
+    _require_local_json(request)
+    return {"status": await _encar_session.cancel()}
 
 
 @app.post("/api/lookup")
@@ -158,6 +219,9 @@ def _lookup(req: LookupRequest) -> dict:
     except Exception as exc:  # noqa: BLE001
         logger.warning("단건 조회 실패: %s (%s)", req.url, exc)
         return {"ok": False, "reason": f"조회에 실패했습니다: {exc}"}
+    finally:
+        if source == "encar":
+            adapter.fetcher.close()
     return {"ok": True, "listing": listing.to_dict()}
 
 
@@ -169,8 +233,8 @@ class VerifyRequest(BaseModel):
 def verify(req: VerifyRequest) -> dict:
     """listing 페이로드(정규화 스키마 형태, 부분 입력 가능)를 받아 체크리스트를 평가한다.
 
-    프레임손상/침수/전손/보험이력공개 같은 핵심 필드는 자동 조회로 채워지지 않는 게 정상이다 —
-    사용자가 화면에서 직접 확인해 넣지 않으면 evaluate_checklist()가 "미확인"으로 게이팅한다.
+    원본 화면에서 확인된 핵심 필드만 자동 반영한다. 확인되지 않은 항목은 사용자가
+    직접 확인해 넣지 않으면 evaluate_checklist()가 "미확인"으로 게이팅한다.
     """
     data = dict(req.listing)
     data.setdefault("listing_id", "manual")
@@ -317,8 +381,9 @@ def _result_to_dict(result: ChecklistResult, listing: Listing) -> dict:
 
 
 @app.on_event("shutdown")
-def _shutdown() -> None:
+async def _shutdown() -> None:
     _fetcher.close()
+    await _encar_session.close()
 
 
 app.mount("/", StaticFiles(directory="web", html=True), name="web")
