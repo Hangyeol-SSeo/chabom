@@ -86,18 +86,17 @@
   function newCarButton(){return `<a class="button primary" href="#lookup">${icon('plus')}매물 추가</a>`;}
   function renderEncarConnection(){
     const status=state.encarSession;
-    const message=status==='waiting'?'열린 엔카 창에서 직접 로그인한 뒤 여기서 완료를 확인해주세요.':status==='saved'?'차봄용 로그인 정보가 저장돼 있습니다. 새 엔카 매물을 조회할 때 자동으로 사용합니다.':status==='expired'?'저장된 엔카 로그인이 만료됐거나 확인되지 않았습니다. 다시 연결해주세요.':'엔카 보험 상세를 자동으로 가져오려면 로그인 창에서 한 번 연결해주세요.';
-    const actions=status==='waiting'?`<button class="button primary small" data-action="encar-login-complete" ${state.encarSessionBusy?'disabled':''}>로그인 완료 확인</button><button class="button secondary small" data-action="encar-login-cancel" ${state.encarSessionBusy?'disabled':''}>취소</button>`:`<button class="button secondary small" data-action="encar-login-start" ${state.encarSessionBusy?'disabled':''}>${state.encarSessionBusy?'창을 여는 중…':status==='saved'?'다시 로그인':'엔카 로그인 창 열기'}</button>`;
-    return `<section class="panel encar-connect"><div class="panel-heading"><h2>엔카 보험 상세 연결</h2><span class="pill ${status==='saved'?'green':status==='expired'?'amber':''}">${status==='saved'?'로그인 정보 저장됨':status==='waiting'?'로그인 대기 중':status==='expired'?'재연결 필요':'미연결'}</span></div><p class="form-note">${message}</p><div class="encar-connect-actions">${actions}${status==='saved'&&state.view==='detail'?'<button class="button primary small" data-action="reload-car">차량 다시 불러오기</button>':''}</div></section>`;
+    const message=status==='waiting'?'열린 엔카 창에서 로그인하고 매물을 찾으세요. 복사한 매물 링크를 차봄에 입력하면 현재 세션을 자동으로 사용합니다.':status==='saved'?'이전에 저장한 엔카 브라우저 상태가 있습니다. 로그인 유효 여부는 매물 조회 시 확인됩니다.':status==='expired'?'보험 상세 화면에서 로그인이 확인되지 않았습니다. 엔카 창을 다시 열어 로그인해주세요.':'먼저 엔카 사이트를 열어 로그인하고 매물을 찾으세요. 차봄이 연 창의 세션을 조회할 때 자동으로 사용합니다.';
+    const actions=status==='waiting'?`<button class="button secondary small" data-action="encar-login-cancel" ${state.encarSessionBusy?'disabled':''}>엔카 창 닫기</button>`:`<button class="button ${state.view==='garage'?'primary':'secondary'} small" data-action="encar-login-start" ${state.encarSessionBusy?'disabled':''}>${state.encarSessionBusy?'창을 여는 중…':'엔카 사이트 열기'}</button>`;
+    return `<section class="panel encar-connect"><div class="panel-heading"><h2>엔카 사이트 연결</h2><span class="pill ${status==='saved'?'green':status==='expired'?'amber':''}">${status==='saved'?'이전 세션 있음':status==='waiting'?'엔카 창 열림':status==='expired'?'로그인 확인 필요':'미연결'}</span></div><p class="form-note">${message}</p><div class="encar-connect-actions">${actions}${status==='saved'&&state.view==='detail'?'<button class="button primary small" data-action="reload-car">차량 다시 불러오기</button>':''}</div></section>`;
   }
   async function changeEncarSession(action){
     if(state.encarSessionBusy)return;
     state.encarSessionBusy=true;render();
     try{
-      const data=await request(`/api/encar/session/${action}`,'POST',action==='complete'?{url:state.draft?.source==='encar'?state.draft.url:state.lookupURL}:{});
+      const data=await request(`/api/encar/session/${action}`,'POST',{});
       state.encarSession=data.status;
-      if(action==='complete')notify('엔카 로그인을 저장했습니다. 차량을 다시 불러오면 보험 상세가 반영됩니다.');
-      else if(action==='start')notify('열린 엔카 창에서 로그인해주세요.');
+      if(action==='start')notify('열린 엔카 창에서 로그인하고 매물 링크를 복사해주세요.');
     }catch(err){notify(err.message,true);}
     finally{state.encarSessionBusy=false;render();}
   }
@@ -115,6 +114,7 @@
         <button class="metric" data-action="show-favorites"><div class="metric-icon">${icon('heart')}</div><div><div class="metric-label">찜한 매물</div><div class="metric-value">${favorites}<small>대</small></div></div></button>
         <a class="metric" href="#dealers"><div class="metric-icon">${icon('user')}</div><div><div class="metric-label">찜한 딜러</div><div class="metric-value">${dealers}<small>명</small></div></div></a>
       </div>
+      ${renderEncarConnection()}
       <div class="toolbar"><div class="tabs" aria-label="차량 필터">
         <button class="tab" data-action="car-filter" data-value="all" aria-pressed="${state.filter==='all'}">전체 차량<span>${state.history.length}</span></button>
         <button class="tab" data-action="car-filter" data-value="favorite" aria-pressed="${state.filter==='favorite'}">찜한 매물<span>${favorites}</span></button>
@@ -319,7 +319,6 @@
       case 'manual':openListing({},null,state.lookupURL);break;
       case 'reload-car':state.lookupURL=state.draft.url;state.lookupMessage='';setView('lookup');lookup(state.lookupURL);break;
       case 'encar-login-start':await changeEncarSession('start');break;
-      case 'encar-login-complete':await changeEncarSession('complete');break;
       case 'encar-login-cancel':await changeEncarSession('cancel');break;
       case 'dealer-filter':state.dealerFilter=button.dataset.value;renderDealers();break;
       case 'favorite-dealer':await favoriteDealer(button);break;

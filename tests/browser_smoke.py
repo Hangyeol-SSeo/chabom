@@ -31,19 +31,19 @@ with tempfile.TemporaryDirectory() as directory:
             def mock_encar_session(route):
                 suffix=route.request.url.rsplit('/',1)[-1]
                 if suffix=='start':auth['status']='waiting'
-                elif suffix=='complete':auth['status']='saved'
-                elif suffix=='cancel':auth['status']='none'
+                elif suffix=='cancel':auth['status']='saved'
                 route.fulfill(status=200,content_type='application/json',body='{"status":"'+auth['status']+'"}')
             page.route('**/api/encar/session',mock_encar_session)
             page.route('**/api/encar/session/**',mock_encar_session)
             page.goto('http://127.0.0.1:8765')
             expect(page.locator('.car-row')).to_have_count(3)
+            expect(page.get_by_role('heading',name='엔카 사이트 연결')).to_be_visible()
+            page.get_by_role('button',name='엔카 사이트 열기').click()
+            expect(page.get_by_text('엔카 창 열림')).to_be_visible()
+            page.get_by_role('button',name='엔카 창 닫기').click()
+            expect(page.get_by_text('이전 세션 있음')).to_be_visible()
             page.get_by_role('link',name='매물 확인',exact=True).click()
-            expect(page.get_by_role('heading',name='엔카 보험 상세 연결')).to_be_visible()
-            page.get_by_role('button',name='엔카 로그인 창 열기').click()
-            expect(page.get_by_text('로그인 대기 중')).to_be_visible()
-            page.get_by_role('button',name='로그인 완료 확인').click()
-            expect(page.get_by_text('로그인 정보 저장됨')).to_be_visible()
+            expect(page.get_by_role('heading',name='엔카 사이트 연결')).to_be_visible()
             page.get_by_role('link',name='차량 보관함',exact=False).last.click()
             page.get_by_role('button',name='기아 더 뉴 모닝 찜하기',exact=True).click()
             page.get_by_role('button',name='찜한 매물1',exact=True).click()

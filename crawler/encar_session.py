@@ -1,7 +1,7 @@
-"""차봄 전용 Encar 로그인 창과 로컬 브라우저 세션을 관리한다.
+"""차봄 전용 Encar 탐색 창과 로컬 브라우저 세션을 관리한다.
 
-비밀번호는 차봄에 입력하지 않는다. 사용자가 Encar 창에서 직접 로그인한 뒤
-로그인 여부를 확인하고 Playwright의 브라우저 상태만 로컬 파일에 저장한다.
+비밀번호는 차봄에 입력하지 않는다. 사용자가 이 창에서 직접 로그인하고
+매물을 찾으면 조회 직전에 같은 브라우저의 상태를 로컬 파일로 복사한다.
 """
 from __future__ import annotations
 
@@ -38,15 +38,38 @@ class EncarSessionManager:
 
                 self._playwright = await async_playwright().start()
                 self._browser = await self._playwright.chromium.launch(headless=False)
-                self._context = await self._browser.new_context(
-                    locale="ko-KR", user_agent=_DEFAULT_USER_AGENT,
-                )
+                options = {"locale": "ko-KR", "user_agent": _DEFAULT_USER_AGENT}
+                if self.state_path.exists():
+                    options["storage_state"] = str(self.state_path)
+                self._context = await self._browser.new_context(**options)
                 self._page = await self._context.new_page()
-                await self._page.goto("https://fem.encar.com/login", wait_until="domcontentloaded", timeout=20000)
+                await self._page.goto("https://fem.encar.com/", wait_until="domcontentloaded", timeout=20000)
             except Exception:
                 await self._close_browser()
                 raise
             return "waiting"
+
+    async def snapshot(self) -> bool:
+        """열린 탐색 창의 현재 세션을 다음 Encar 조회에 반영한다."""
+        async with self._lock:
+            if not self._context:
+                return False
+            await self._save_state()
+            return True
+
+    async def _save_state(self) -> None:
+        state = await self._context.storage_state()
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = None
+        try:
+            descriptor, temporary = tempfile.mkstemp(prefix=".encar_auth_", dir=self.state_path.parent)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+                json.dump(state, output, ensure_ascii=False)
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, self.state_path)
+        finally:
+            if temporary and os.path.exists(temporary):
+                os.unlink(temporary)
 
     async def complete(self, history_url: str) -> str:
         async with self._lock:
@@ -71,28 +94,21 @@ class EncarSessionManager:
                 if probe:
                     await probe.close()
 
-            state = await self._context.storage_state()
-            self.state_path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = None
-            try:
-                descriptor, temporary = tempfile.mkstemp(prefix=".encar_auth_", dir=self.state_path.parent)
-                with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-                    json.dump(state, output, ensure_ascii=False)
-                os.chmod(temporary, 0o600)
-                os.replace(temporary, self.state_path)
-            finally:
-                if temporary and os.path.exists(temporary):
-                    os.unlink(temporary)
+            await self._save_state()
             await self._close_browser()
             return "saved"
 
     async def cancel(self) -> str:
         async with self._lock:
+            if self._context:
+                await self._save_state()
             await self._close_browser()
             return self.status()
 
     async def close(self) -> None:
         async with self._lock:
+            if self._context:
+                await self._save_state()
             await self._close_browser()
 
     async def _close_browser(self) -> None:

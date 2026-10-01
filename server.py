@@ -35,6 +35,7 @@ from fastapi import FastAPI, HTTPException, Request
 from contextlib import closing
 from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -159,12 +160,17 @@ async def encar_session_cancel(request: Request) -> dict:
 
 
 @app.post("/api/lookup")
-def lookup(req: LookupRequest) -> dict:
+async def lookup(req: LookupRequest) -> dict:
     try:
         url = history_store.normalize_url(req.url)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    result = _lookup(LookupRequest(url=url))
+    if _identify_source(url)[0] == "encar":
+        try:
+            await _encar_session.snapshot()
+        except Exception as exc:
+            logger.warning("Encar 탐색 창 세션 저장 실패: %s", type(exc).__name__)
+    result = await run_in_threadpool(_lookup, LookupRequest(url=url))
     if result.get('listing'):
         listing = Listing.from_dict(result['listing'])
         with closing(dealer_store.get_connection(DEALERS_DB_PATH)) as conn:

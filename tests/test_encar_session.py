@@ -75,6 +75,14 @@ def test_completed_login_saves_private_reusable_state(tmp_path):
     assert stat.S_IMODE(manager.state_path.stat().st_mode) == 0o600
 
 
+def test_browsing_session_is_saved_without_manual_confirmation(tmp_path):
+    manager = _manager(tmp_path, logged_in=True)
+    assert asyncio.run(manager.snapshot()) is True
+    assert json.loads(manager.state_path.read_text())["cookies"][0]["name"] == "synthetic-session"
+    assert stat.S_IMODE(manager.state_path.stat().st_mode) == 0o600
+    assert manager.status() == "waiting"
+
+
 def test_unverified_login_never_overwrites_saved_state(tmp_path):
     manager = _manager(tmp_path, logged_in=False)
     manager.state_path.write_text('{"existing":"session"}')
