@@ -1,14 +1,30 @@
 # 차봄 · Chabom
 
-**내 차를 고르는 공간.** 관심 있는 중고차를 한 번 더 살펴보고, 차량과 딜러를 보관하는 개인용 서비스입니다.
+**내 차를 고르는 공간.** 관심 있는 중고차를 한 번 더 살펴보고, 차량과 딜러를 보관하는 웹 서비스입니다.
+허용된 Google·카카오 계정으로 로그인하면 각자 자기 보관함을 씁니다. 배포 방법은 [`docs/deploy.md`](docs/deploy.md)를 참고하세요.
 
 프로젝트 폴더와 Git 저장소 루트는 `chabom/`입니다. 상위 `NemoNemo/`는 저장소에 포함하지 않습니다.
 
 `used-car-selector-spec.md` 명세에서 출발했지만, 두 차례의 아키텍처 개편을 거쳐 지금은
 **여러 매물을 훑어보는 검색 도구가 아니라, 이미 찾은 매물 1건을 깊게 검증하는 도구**다. 사용
 언어/도구: **Python 3.13**, `Playwright`(단발성 실브라우저 조회) + `BeautifulSoup4`(HTML 파싱),
-`FastAPI`+`uvicorn`(로컬 검증 서버), `PyYAML`(가중치 설정), `sqlite3`(딜러 블랙리스트·이력
-저장), `pytest`(단위 테스트).
+`FastAPI`+`uvicorn`(조회·검증 API, Cloud Run), `PyYAML`(가중치 설정), Firebase Hosting·Auth·
+Firestore(화면·로그인·사용자별 저장), `pytest`(단위 테스트), Firebase 에뮬레이터(보안 규칙·브라우저 테스트).
+
+> **2026-10-01 세 번째 개편 — 로컬 도구에서 여러 사람이 쓰는 웹 서비스로.** 인터넷에서 바로
+> 찾은 차를 조회·분석할 수 있도록 공개 배포한다. 운영비 0원을 목표로 무료 한도 안에서 구성했다.
+> - 화면(`web/`)은 **Firebase Hosting**(`<프로젝트>.web.app`)이 내준다. 빌드 단계는 없다.
+> - 로그인은 **Firebase Auth**로 Google과 카카오(OIDC)를 받고, **허용 목록에 등록된 이메일만**
+>   쓸 수 있다(`scripts/allowlist.py`). 나머지 계정은 "사용 승인 대기" 화면에 머문다.
+> - 차량 보관함·딜러 기록은 브라우저가 **사용자별 Firestore 문서**(`users/{uid}/...`)에 직접
+>   저장한다(`web/store.js`). 다른 사용자의 데이터는 보안 규칙(`firestore.rules`)이 막는다.
+>   예전 SQLite 저장소(`storage/history.py`, `storage/dealers.py`)는 이것으로 대체됐다.
+> - 링크 조회(Playwright)와 체크리스트 판정은 **Cloud Run(서울)**의 API 서버(`server.py`)가
+>   맡는다. 사용자 데이터를 저장하지 않으며, ID 토큰·허용 목록을 검사하고(`api/auth.py`)
+>   사용자별 일일 조회 한도와 사이트별 간격을 두고 한 번에 한 건씩 연다.
+> - 케이카·엔카 단건 조회도 사용자 결정으로 그대로 유지한다(아래 2026-09-20 정정 참고).
+>   공용 서버 IP로 여러 사용자가 조회하게 되므로, 허용 계정·일일 한도·직렬 처리로 호출량을
+>   낮게 유지한다.
 
 > **2026-09-18 두 번째 아키텍처 개편 — 점수 기반 마켓플레이스에서 체크리스트 검증 도구로.**
 > 사용자가 실시간 검색 웹앱(첫 번째 개편의 결과물)에 다섯 가지 문제를 제기했다: (1) robots.txt/
@@ -27,7 +43,7 @@
 > 않으면 자동으로 "미확인"으로 게이팅되어 전체 판정이 "보류"로 강제된다**(문제 2, 3 해결 —
 > `scoring/checklist.py` 참고). 딜러는 sqlite에 누적 저장되어, 한 번 "제외" 등록하면 이후 같은
 > 딜러의 다른 매물을 검증할 때 자동으로 걸린다 — 이름이 아니라 사이트별 판매자 ID로
-> 식별한다(문제 5 해결 — `storage/dealers.py` 참고).
+> 식별한다(문제 5 해결 — 지금은 `web/store.js`의 사용자별 딜러 기록).
 >
 > 이전의 실시간 검색 마켓플레이스(가격/연식/필터로 여러 매물을 긁어와 카드로 보여주던 버전)는
 > 완전히 대체됐다 — `server.py`/`web/index.html`이 이 커밋에서 통째로 새 버전으로 바뀌었다.
@@ -68,7 +84,7 @@
 
 1. 원하는 사이트(보배드림·KB차차차·케이카·엔카 등 아무 곳이나)에서 평소처럼 검색해 마음에 드는
    매물을 찾는다 — 이 프로그램은 검색을 대신해주지 않는다.
-2. 이 프로그램(`python server.py` → `localhost:8000`)에 그 매물 링크를 붙여넣거나 직접 입력한다.
+2. 차봄 웹사이트에 로그인해 그 매물 링크를 붙여넣거나 직접 입력한다.
 3. **침수·전손·도난 이력과 카히스토리 등 보험이력 조회**는 크롤링으로 안전하게 확보할 수 없다
    — 화면에 뜨는 질문(②~⑤)에 맞춰 그 사이트/카히스토리를 직접 열어 확인한 뒤 답한다. 답하지
    않으면(모르겠음) 그 항목은 자동으로 "미확인"이 되어 전체 판정이 보류된다. **①번 프레임(뼈대)
@@ -279,35 +295,51 @@ crawler/adapters/encar_detail_adapter.py [웹앱 전용, 2026-09-20 신설] 엔�
                                           "차량이력" DOM 파싱, api.encar.com(전체 차단)은 절대 직접 호출 안 함
 crawler/adapters/blocked_adapter.py      [CLI 배치 전용] 엔카 대량 크롤링만 여전히 전면 차단(단건 조회와는 별개)
 storage/db.py              [CLI 전용] sqlite 스냅샷 저장, 가격 이력 추적
-storage/dealers.py         [웹앱 전용, 2026-09-18 신설] 딜러 블랙리스트 sqlite — (source, dealer_key) 1차 키 + 전화번호 보조 매칭
 vision/analyzer.py         사진 2차 분석 스텁(스펙 7장, 미구현)
 cli/main.py                 [배치/디버깅용] score/crawl — 0~100 점수 방식, 여러 매물을 한 번에 처리
-server.py                   [웹앱 기본 경로] 단건 매물 검증 API(FastAPI) — /api/lookup, /api/verify, /api/dealers/*
-web/index.html               단건 매물 검증 프론트엔드(server.py가 서빙)
-tests/                       pytest 단위 테스트 — 체크리스트/딜러 DB/스코어링/5개 어댑터 오프라인 파싱
+server.py                   [Cloud Run] 조회·검증 API(FastAPI) — /api/lookup, /api/verify. 사용자 데이터는 저장 안 함
+api/auth.py                 Firebase ID 토큰 검증, 허용 이메일 목록, 사용자별 일일 조회 한도(Firestore usage/)
+api/validation.py           링크·전화번호 정규화(web/store.js와 같은 규칙)
+web/index.html, app.js      화면(Firebase Hosting이 서빙, 빌드 없음)
+web/firebase.js, auth.js    Firebase 초기화(/__/firebase/init.json), Google·카카오 로그인, 승인 대기 화면
+web/store.js                사용자별 Firestore 저장소 — 조회 이력·찜, 딜러 찜·블랙리스트(예전 storage/*.py 대체)
+web/api.js                  /api 호출에 ID 토큰을 붙인다
+firestore.rules             본인 데이터만, 허용 목록 계정만, 문서 형식·블랙리스트 딜러 찜 금지 검사
+firebase.json               Hosting(/api/** → Cloud Run rewrite), Firestore, 에뮬레이터 설정
+Dockerfile, deploy/         Cloud Run 이미지와 배포 스크립트
+scripts/allowlist.py        허용 이메일 추가·삭제·목록
+scripts/import_local_data.py  예전 로컬 SQLite 데이터를 웹 계정으로 옮기기
+tests/                       pytest(체크리스트/스코어링/어댑터 파싱/API), tests/rules(보안 규칙), browser_smoke.py(E2E)
 ```
 
 ## 설치 및 실행
 
+배포(Firebase·Cloud Run)는 [`docs/deploy.md`](docs/deploy.md)에 단계별로 정리했다. 여기서는 로컬 개발만 다룬다.
+
 ```bash
 python3 -m venv .venv
-./.venv/bin/pip install -r requirements.txt
+./.venv/bin/pip install -r requirements-dev.txt
 ./.venv/bin/python -m playwright install chromium   # 최초 1회, 실브라우저 바이너리 설치
+npm install                                          # Firebase CLI·에뮬레이터, 규칙 테스트 도구 (Node 20+, Java 11+ 필요)
 ```
 
-### 1) 웹앱으로 매물 검증 (권장 — 이 프로젝트의 기본 사용법)
+### 1) 웹앱 로컬 개발 (Firebase 에뮬레이터)
 
 ```bash
-./.venv/bin/python server.py
-# 브라우저에서 http://localhost:8000 접속
+npm run emulators                                    # 터미널 1: Auth·Firestore 에뮬레이터
+FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 ./.venv/bin/python -m scripts.allowlist --project demo-chabom add 내이메일@gmail.com
+CHABOM_DEV=1 GOOGLE_CLOUD_PROJECT=demo-chabom \
+  FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099 FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 \
+  ./.venv/bin/python server.py                       # 터미널 2: http://localhost:8000
 ```
 
-매물 링크를 붙여넣고 "가져오기"를 누르면 그 한 건만 열어서 필드를 채워준다(보배드림·KB차차차만
-자동 지원, 그 외 사이트는 "직접 입력하기"). 프레임손상·침수·전손·도난·보험이력 같은 핵심
-항목은 화면에서 직접 확인해 답해야 하고, 안 그러면 "미확인"으로 처리되어 전체 판정이 보류된다.
-"검증하기"를 누르면 체크리스트 결과와 종합 판정(통과/보류)이 나오고, 딜러 정보 카드에서
-"이 딜러 제외 등록"을 누르면 그 딜러의 이후 매물도 자동으로 걸린다. 로컬에서만 실행되는
-개인용 도구이며(CORS도 localhost만 허용), 서버를 끄면(Ctrl+C) 함께 종료된다.
+`CHABOM_DEV=1`이면 서버가 화면(`web/`)과 `demo-` 프로젝트 설정을 함께 내주고, 화면은 에뮬레이터에
+붙는다. 에뮬레이터의 Google 로그인 창에서 위에 허용한 이메일로 계정을 만들면 된다.
+
+매물 링크를 붙여넣고 "차량 불러오기"를 누르면 그 한 건만 열어서 필드를 채워준다(보배드림·
+KB차차차·케이카·엔카). 프레임손상·침수·전손·도난·보험이력 같은 핵심 항목은 화면에서 직접
+확인해 답해야 하고, 안 그러면 "미확인"으로 처리되어 전체 판정이 보류된다. 딜러 카드에서
+"제외 등록"을 누르면 그 딜러의 이후 매물도 자동으로 걸린다.
 
 ### 2) 수동 입력 JSON으로 스코어링만 실행 (네트워크 불필요)
 
@@ -338,26 +370,26 @@ robots.txt+CSR 구조 근거와 함께 즉시 차단 메시지를 출력하고 �
 ### 테스트
 
 ```bash
-./.venv/bin/python -m pytest tests/ -v
+./.venv/bin/python -m pytest tests/ -v   # 단위 테스트(어댑터 파싱·체크리스트·API 인증/한도)
+npm run test:rules                       # Firestore 보안 규칙(에뮬레이터)
+npm run test:e2e                         # 브라우저 통합 테스트(에뮬레이터 + Playwright)
 ```
 
-테스트는 `.__new__()`로 어댑터를 만들어 파싱 로직만 오프라인으로 검증하므로 Playwright 설치
-여부와 무관하게 항상 실행된다(네트워크·브라우저 접근 없음).
+pytest는 `.__new__()`로 어댑터를 만들어 파싱 로직만 오프라인으로 검증하고, API 테스트는 Firebase
+대신 가짜 gateway를 쓰므로 네트워크·브라우저 없이 항상 실행된다. `test:e2e`는 실제 차량 사이트를
+조회하지 않으며, 미리 설치된 Chromium을 쓰려면 `CHROMIUM_PATH`를 지정한다.
 
-## 웹앱 API (`server.py`)
+## 웹앱 기능과 API
 
 ### 조회한 차량과 찜
 
 **차량 보관함**에서 조회 링크를 최근 순으로 확인하고 하트 버튼으로 **찜 / 찜 해제**할 수 있습니다.
 **찜한 매물** 필터, 차량명/사이트 검색, 가격 정렬을 제공하며 차량명을 누르면 저장된 정보를 엽니다.
 **원문 보기**로 실제 매물 페이지를 열 수 있습니다.
-조회 실패한 링크도 저장하며, 같은 링크를 다시 조회해도 찜 상태는 유지됩니다.
-데이터는 `data/listings.db`에 저장되어 새로고침과 서버 재시작 후에도 유지됩니다.
+조회 실패한 링크도 저장하며, 같은 링크를 다시 조회해도 찜 상태와 이전에 저장한 차량 정보는 유지됩니다.
+데이터는 로그인한 사용자의 Firestore(`users/{uid}/history`)에 저장됩니다.
 직접 입력한 링크도 검증 시 저장됩니다. 저장된 정보는 조회 당시 기준입니다.
-
-기존 `listing_snapshots` 데이터는 처음 목록을 열 때 **기존 저장 매물**로 가져옵니다.
-이전 웹앱은 조회 이력을 저장하지 않았으므로, 저장된 스냅샷 이외의 과거 웹 조회 내역은
-복원할 수 없습니다. 서버가 이미 실행 중이면 새 API를 적용하기 위해 재시작해야 합니다.
+예전 로컬 버전의 `data/*.db`는 `scripts/import_local_data.py`로 옮길 수 있습니다.
 
 ### 딜러 관리
 
@@ -365,27 +397,23 @@ robots.txt+CSR 구조 근거와 함께 즉시 차단 메시지를 출력하고 �
 영역에서 찜하거나 사유와 함께 제외 등록할 수 있으며 딜러 관리에서 직접 찜 딜러를 추가할 수도
 있습니다. 블랙리스트에는 제외 사유와 날짜를 표시하며 해제할 수 있습니다.
 
-식별 기준은 사이트 + 딜러 ID입니다. 블랙리스트 등록 시 딜러 찜은 해제되고, 제외 상태에서는
-다시 찜할 수 없습니다. 찜은 검증 판정에 영향을 주지 않습니다. 기존 `data/dealers.db`의
-블랙리스트 기록은 유지되며 favorite 컬럼이 자동 추가됩니다.
+식별 기준은 사이트 + 딜러 ID입니다(`users/{uid}/dealers/{source}__{dealer_key}`). 블랙리스트 등록 시
+딜러 찜은 해제되고, 제외 상태에서는 다시 찜할 수 없습니다(보안 규칙도 같은 조건을 검사). 찜은
+검증 판정에 영향을 주지 않습니다. 블랙리스트와 전화번호 대조는 각 사용자 본인의 기록끼리만 합니다.
 
 화면 구조와 참고한 사용성 원칙은 `docs/ui-ux.md`에 정리했습니다.
 
-- `GET /api/dealers` — 저장된 딜러 및 찜/블랙리스트 상태 조회.
-- `POST /api/dealers/favorite` — `{source, dealer_key, favorite, display_name?, phone?, region?}`로 찜 상태 변경.
-- `GET /api/history` — 조회 내역 및 찜 상태 조회.
-- `PATCH /api/history/{id}/favorite` — `{favorite: true|false}`로 찜 상태 변경.
+### API (`server.py`, 모든 요청에 `Authorization: Bearer <Firebase ID 토큰>` 필요)
 
-- `POST /api/lookup` — `{url}` → 그 한 건만 열어서 정규화된 `Listing`을 반환(보배드림·KB차차차·
-  케이카·엔카 4곳 모두 지원. 그 외 사이트는 `ok:false`+안내 메시지 후 직접 입력 요청).
-- `POST /api/verify` — `{listing: {...}}`(정규화 스키마 형태, 부분 입력 가능) → 체크리스트
-  평가 결과(`overall`, `hold_reasons`, `items[]`, `dealer_status`). 프레임손상/침수/전손/도난/
-  보험이력공개는 프론트가 사용자의 라디오 응답을 그대로 실어 보낸다 — 서버는 그 값을 믿을 뿐
-  자체적으로 추측하지 않는다.
-- `POST /api/dealers/blacklist` — `{source, dealer_key, reason, phone?, region?, display_name?}`
-  → sqlite(`data/dealers.db`)에 upsert. `dealer_key`가 비어 있으면(자동 조회 실패+수동 입력 시
-  ID를 안 채운 경우) 등록을 거부한다 — 식별 불가능한 딜러를 블랙리스트에 넣을 수 없기 때문.
-- `POST /api/dealers/unblacklist`, `GET /api/dealers/blacklist`(전체 목록) — 해제/조회.
+- `POST /api/lookup` — `{url}` → `{ok, url, source, listing | reason}`. 그 한 건만 열어서 정규화된
+  `Listing`을 반환한다(보배드림·KB차차차·케이카·엔카. 그 외 사이트는 `ok:false`+안내 메시지 후
+  직접 입력 요청). 사용자별 일일 한도(`LOOKUP_DAILY_LIMIT`, 기본 30회)를 넘으면 429. 서버는
+  결과를 저장하지 않고, 브라우저가 사용자 Firestore에 기록한다.
+- `POST /api/verify` — `{listing: {...}, dealer_context?: {record?, phone_matches[]}}` → 체크리스트
+  평가 결과(`overall`, `hold_reasons`, `items[]`, `dealer_status`). `dealer_context`는 브라우저가
+  본인 딜러 기록에서 읽어 보낸다(해당 딜러의 블랙리스트 여부, 같은 전화번호의 블랙리스트 딜러).
+  프레임손상/침수/전손/도난/보험이력공개는 사용자의 라디오 응답을 그대로 믿을 뿐 서버가 추측하지 않는다.
+- 401: 로그인 필요·토큰 만료, 403: 허용 목록 미등록·이메일 미인증 Google 계정·지원하지 않는 로그인 방식.
 
 ## 사용자 설정 파라미터 (스펙 6장, CLI 배치 경로)
 
@@ -411,7 +439,7 @@ CLI(`score`/`crawl` 공통 옵션): `--min-price`, `--max-price`, `--min-year`, 
 5. **딜러 교차 사이트 자동 식별** — 사업자등록번호가 개별(특히 개인) 판매자 페이지에 노출되지
    않는 경우가 많아 보편적인 키로 쓸 수 없었다(실측 확인). 사이트별 판매자 ID가 확실한 1차
    키이고, 전화번호는 사용자가 직접 입력해야 하는 보조 매칭용(참고 경고만, 자동 확정 아님)이다
-   — `storage/dealers.py` 모듈 docstring 참고.
+   — `web/store.js`의 `dealerContext()`와 `scoring/checklist.py` 참고.
 6. **KB차차차 자동 조회의 딜러 전화번호** — 상세페이지에 번호가 바로 노출되지 않고 "전화 연결"
    레이어를 열어야 확인 가능한 구조라(실측 확인) 크롤링하지 않는다. `dealerNo`(사이트별
    판매자 ID)는 페이지 내 JS 설정 객체에서 정규식으로 추출해 채운다.

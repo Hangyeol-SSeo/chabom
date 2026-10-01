@@ -1,5 +1,7 @@
-'use strict';
-(() => {
+// 화면 렌더링과 조작. 데이터는 store(사용자 Firestore), 조회·판정은 api(Cloud Run)로 처리한다.
+import { normalizeURL } from './store.js';
+
+export function startApp({ store, api, user, signOut }) {
   const paths = {
     garage:'M3 10 12 3l9 7v11H3V10Zm4 11v-9h10v9M7 16h10',
     search:'m21 21-5-5M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0Z',
@@ -31,19 +33,19 @@
     clearTimeout(toastTimer); $('toast').textContent=message; $('toast').className='toast'+(error?' error':''); $('toast').hidden=false;
     toastTimer=setTimeout(()=>$('toast').hidden=true,error?8000:3500);
   }
-  async function request(url, method='GET', body){
-    const response=await fetch(url,{method,headers:body?{'Content-Type':'application/json'}:undefined,body:body?JSON.stringify(body):undefined});
-    let data; try { data=await response.json(); } catch { throw new Error('서버에 연결할 수 없습니다. 다시 시도해주세요.'); }
-    if(!response.ok || data.ok===false) throw new Error(typeof data.detail==='string'?data.detail:data.reason || '요청을 처리하지 못했습니다.');
-    return data;
+  // 판정 전에 딜러를 기록해 두고(처음 보는 딜러도 나중에 찾을 수 있게), 내 딜러 기록을 함께 보낸다.
+  async function requestVerify(listing){
+    const d=listing.dealer||{};
+    if(d.dealer_id) await store.upsertDealer(listing.source||'manual',d.dealer_id,d);
+    return api.post('/api/verify',{listing,dealer_context:await store.dealerContext(listing)});
   }
   async function loadData(){
     const revision=++loadRevision;
-    const results=await Promise.allSettled([request('/api/history'),request('/api/dealers')]);
+    const results=await Promise.allSettled([store.listHistory(),store.listDealers()]);
     if(revision!==loadRevision) return;
     const errors=[];
-    if(results[0].status==='fulfilled') state.history=results[0].value.items; else errors.push('차량 목록을 불러오지 못했습니다.');
-    if(results[1].status==='fulfilled') state.dealers=results[1].value.dealers; else errors.push('딜러 목록을 불러오지 못했습니다.');
+    if(results[0].status==='fulfilled') state.history=results[0].value; else errors.push('차량 목록을 불러오지 못했습니다.');
+    if(results[1].status==='fulfilled') state.dealers=results[1].value; else errors.push('딜러 목록을 불러오지 못했습니다.');
     state.loading=false;
     $('connectionError').hidden=!errors.length;
     $('connectionError').innerHTML=esc(errors.join(' '))+' <button class="button small secondary" data-action="retry">다시 시도</button>';
@@ -117,9 +119,9 @@
     const l=item.listing,v=l?.vehicle||{},d=state.dealers.find(d=>d.source===(l?.source||item.source)&&d.dealer_key===l?.dealer?.dealer_id);
     const photo=(l?.photos?.urls||[]).find(u=>safeURL(u)&&!/(logo|assets|bobae\.png)/i.test(u));
     const facts=[v.model_year?`${v.model_year}년`:null,v.mileage_km!=null?`${v.mileage_km.toLocaleString()} km`:null,v.region||null].filter(Boolean).join(' · ');
-    return `<article class="car-row"><div class="car-main"><div class="car-visual">${icon('car')}${photo?`<img src="${esc(safeURL(photo))}" alt="" loading="lazy" referrerpolicy="no-referrer">`:''}</div><div class="car-copy"><div class="pills"><span class="pill">${esc(sourceName(item.source))}</span>${item.status==='failed'?'<span class="pill amber">조회 실패</span>':''}${d?.blacklisted?'<span class="pill red">제외 딜러</span>':''}${item.origin==='snapshot'?'<span class="pill">기존 저장</span>':''}</div><button class="car-title" data-action="open-car" data-id="${item.id}">${esc(titleOf(l))}</button><p class="car-facts">${esc(facts||'상세 정보를 입력해주세요.')}</p></div></div>
+    return `<article class="car-row"><div class="car-main"><div class="car-visual">${icon('car')}${photo?`<img src="${esc(safeURL(photo))}" alt="" loading="lazy" referrerpolicy="no-referrer">`:''}</div><div class="car-copy"><div class="pills"><span class="pill">${esc(sourceName(item.source))}</span>${item.status==='failed'?'<span class="pill amber">조회 실패</span>':''}${d?.blacklisted?'<span class="pill red">제외 딜러</span>':''}${item.origin==='snapshot'?'<span class="pill">기존 저장</span>':''}</div><button class="car-title" data-action="open-car" data-id="${esc(item.id)}">${esc(titleOf(l))}</button><p class="car-facts">${esc(facts||'상세 정보를 입력해주세요.')}</p></div></div>
       <div class="car-price">${priceOf(l)}<br><a class="row-link" href="${esc(safeURL(item.url))}" target="_blank" rel="noopener noreferrer">원문 보기${icon('arrow')}</a></div>
-      <button class="icon-button" data-action="favorite-car" data-id="${item.id}" aria-pressed="${item.favorite}" aria-label="${esc(titleOf(l))} ${item.favorite?'찜 해제':'찜하기'}">${icon('heart')}</button></article>`;
+      <button class="icon-button" data-action="favorite-car" data-id="${esc(item.id)}" aria-pressed="${item.favorite}" aria-label="${esc(titleOf(l))} ${item.favorite?'찜 해제':'찜하기'}">${icon('heart')}</button></article>`;
   }
   function renderLookup(){
     $('main').innerHTML=heading('CHECK A CAR','매물 확인','마음에 드는 차량의 링크를 붙여넣어 주세요.')+`<div class="lookup-layout"><section class="panel lookup-panel"><h2>이 차, 조금 더 살펴볼까요?</h2><form id="lookupForm" class="lookup-form"><label class="field-label" for="lookupURL">매물 링크</label><div class="url-row"><input id="lookupURL" type="url" required placeholder="https://…" value="${esc(state.lookupURL)}"><button class="button primary" type="submit" ${state.lookupRunning?'disabled':''}>${state.lookupRunning?'불러오는 중…':'차량 불러오기'}${icon('arrow')}</button></div></form><div class="source-hints"><span>엔카</span><span>케이카</span><span>KB차차차</span><span>보배드림</span></div><div id="lookupMessage" class="inline-message${state.lookupError?' error':''}" role="status" ${!state.lookupMessage?'hidden':''}>${esc(state.lookupMessage)}</div><div class="manual-row"><span>링크가 없거나 불러오지 못하셨나요?</span><button class="button quiet small" data-action="manual">직접 입력${icon('arrow')}</button></div></section><div class="steps"><div><p class="number">01 / 불러오기</p><h3>차량 정보 확인</h3><p>가격과 기본 정보를<br>한곳에서 확인하세요.</p></div><div><p class="number">02 / 확인하기</p><h3>핵심 이력 체크</h3><p>기록부와 보험이력으로<br>빠진 항목을 채워보세요.</p></div><div><p class="number">03 / 보관하기</p><h3>마음에 들면 찜</h3><p>차량과 딜러를 저장해<br>다시 비교해보세요.</p></div></div></div>`;
@@ -128,12 +130,15 @@
     if(state.lookupRunning)return;
     state.lookupURL=url;state.lookupRunning=true;state.lookupError=false;state.lookupMessage='차량 정보를 불러오고 있습니다. 잠시만 기다려주세요.';renderLookup();
     try{
-      const response=await fetch('/api/lookup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url})});
-      const data=await response.json();
+      const data=await api.post('/api/lookup',{url});
+      // 실패한 조회도 보관함에 남긴다. 이전에 저장한 차량 정보는 지우지 않는다.
+      const id=await store.recordHistory(data.url,{source:data.source,listing:data.ok?data.listing:null,status:data.ok?'success':'failed',reason:data.ok?'':data.reason||''});
+      const d=data.ok?data.listing?.dealer:null;
+      if(d?.dealer_id)await store.upsertDealer(data.listing.source,d.dealer_id,d);
       await loadData();
-      if(!response.ok||!data.ok)throw new Error(typeof data.detail==='string'?data.detail:data.reason||'차량 정보를 불러오지 못했습니다.');
+      if(!data.ok)throw new Error(data.reason||'차량 정보를 불러오지 못했습니다.');
       state.lookupMessage='';
-      if(state.view==='lookup')openListing(data.listing,data.history_id,url);
+      if(state.view==='lookup')openListing(data.listing,id,data.url);
       else notify('차량을 보관함에 저장했습니다.');
     }catch(err){state.lookupError=true;state.lookupMessage=err.message;}
     finally{state.lookupRunning=false;if(state.view==='lookup')renderLookup();}
@@ -150,7 +155,7 @@
     const l=state.draft;if(!l){setView('lookup');return;}
     const v=l.vehicle||{},d=l.dealer||{},ih=l.insurance_history||{};
     const item=state.history.find(i=>i.id===state.historyId);
-    $('main').innerHTML=`<button class="back-link" data-action="back">${icon('back')}차량 보관함</button><div class="detail-title"><div><div class="pills"><span class="pill">${esc(sourceName(l.source))}</span>${item?`<span class="pill">${esc(shortDate(item.last_viewed_at))} 저장</span>`:''}</div><h1>${esc(titleOf(l)==='차량 정보 미확인'?'차량 정보 확인':titleOf(l))}</h1><p class="subtitle">${item?'저장된 정보를 확인하고 필요한 항목을 보완하세요.':'차량 정보와 핵심 이력을 확인해주세요.'}</p></div>${item?`<button class="icon-button" data-action="favorite-car" data-id="${item.id}" aria-pressed="${item.favorite}" aria-label="${item.favorite?'매물 찜 해제':'매물 찜하기'}">${icon('heart')}</button>`:''}</div>
+    $('main').innerHTML=`<button class="back-link" data-action="back">${icon('back')}차량 보관함</button><div class="detail-title"><div><div class="pills"><span class="pill">${esc(sourceName(l.source))}</span>${item?`<span class="pill">${esc(shortDate(item.last_viewed_at))} 저장</span>`:''}</div><h1>${esc(titleOf(l)==='차량 정보 미확인'?'차량 정보 확인':titleOf(l))}</h1><p class="subtitle">${item?'저장된 정보를 확인하고 필요한 항목을 보완하세요.':'차량 정보와 핵심 이력을 확인해주세요.'}</p></div>${item?`<button class="icon-button" data-action="favorite-car" data-id="${esc(item.id)}" aria-pressed="${item.favorite}" aria-label="${item.favorite?'매물 찜 해제':'매물 찜하기'}">${icon('heart')}</button>`:''}</div>
       ${item?.status==='failed'?'<p class="inline-message error">최근 조회에 실패했습니다. 이전 저장 정보를 확인하거나 직접 입력해주세요.</p>':''}
       <div class="detail-layout"><div><div id="verificationResult" tabindex="-1"></div><form id="vehicleForm">
       <section class="panel"><div class="panel-heading"><h2><span class="step-number">01</span>차량 정보</h2>${safeURL(l.url)?`<a class="row-link" href="${esc(safeURL(l.url))}" target="_blank" rel="noopener noreferrer">원문 보기${icon('arrow')}</a>`:''}</div>
@@ -184,8 +189,12 @@
   }
   async function verify(){
     state.draft=collectListing();const submitted=structuredClone(state.draft);const button=$('verifyButton');button.disabled=true;button.textContent='검증 중…';$('verifyError').textContent='';
-    try{const result=await request('/api/verify','POST',{listing:submitted});await loadData();
-      if(state.view==='detail'&&JSON.stringify(state.draft)===JSON.stringify(submitted)){state.result=result;state.historyId=state.history.find(i=>safeURL(i.url)===safeURL(submitted.url))?.id||state.historyId;renderDetail();$('verificationResult').focus();$('verificationResult').scrollIntoView({block:'start',behavior:'smooth'});}else notify('검증 내용을 저장했습니다.');
+    try{const result=await requestVerify(submitted);
+      let savedId=null,url=null;
+      try{url=normalizeURL(submitted.url);}catch{/* 링크 없이 직접 입력한 차량은 보관함에 저장하지 않는다. */}
+      if(url)savedId=await store.recordHistory(url,{source:result.listing.source,listing:result.listing});
+      await loadData();
+      if(state.view==='detail'&&JSON.stringify(state.draft)===JSON.stringify(submitted)){state.result=result;state.historyId=savedId||state.historyId;renderDetail();$('verificationResult').focus();$('verificationResult').scrollIntoView({block:'start',behavior:'smooth'});}else notify('검증 내용을 저장했습니다.');
     }catch(err){if($('verifyError'))$('verifyError').textContent=err.message;else notify(err.message,true);}
     finally{if($('verifyButton')){$('verifyButton').disabled=false;$('verifyButton').innerHTML='저장하고 검증하기'+icon('arrow');}}
   }
@@ -225,7 +234,7 @@
     await loadData();
     if(state.view==='detail'){
       if(previousResult){
-        try{state.result=await request('/api/verify','POST',{listing:state.draft});}
+        try{state.result=await requestVerify(state.draft);}
         catch{state.result=null;notify('딜러 상태는 저장했습니다. 검증 결과는 다시 확인해주세요.',true);}
       }
       renderDetailDealer();renderResult();
@@ -233,12 +242,12 @@
   }
   async function favoriteDealer(button){
     const d=findDealer(button);if(!d)return;button.disabled=true;
-    try{await request('/api/dealers/favorite','POST',{...dealerPayload(d),favorite:!d.favorite});await refreshAfterDealer();notify(d.favorite?'딜러 찜을 해제했습니다.':'찜 딜러에 저장했습니다.');}
+    try{await store.setDealerFavorite(d.source,d.dealer_key,!d.favorite,dealerPayload(d));await refreshAfterDealer();notify(d.favorite?'딜러 찜을 해제했습니다.':'찜 딜러에 저장했습니다.');}
     catch(err){notify(err.message,true);button.disabled=false;}
   }
   async function unblockDealer(button){
     const d=findDealer(button);if(!d)return;button.disabled=true;
-    try{await request('/api/dealers/unblacklist','POST',{source:d.source,dealer_key:d.dealer_key});await refreshAfterDealer();notify('블랙리스트를 해제했습니다.');}
+    try{await store.unblacklistDealer(d.source,d.dealer_key);await refreshAfterDealer();notify('블랙리스트를 해제했습니다.');}
     catch(err){notify(err.message,true);button.disabled=false;}
   }
   function openDealerDialog(d=null){
@@ -251,14 +260,14 @@
   $('dealerDialogForm').addEventListener('submit',async event=>{
     event.preventDefault();const d=dialogContext;const button=$('dialogSubmit');button.disabled=true;$('dialogError').textContent='';
     try{
-      if(d){const reason=$('blockReason').value.trim();if(!reason)throw new Error('제외 사유를 입력해주세요.');await request('/api/dealers/blacklist','POST',{...dealerPayload(d),reason});}
-      else {const key=$('newDealerId').value.trim();if(!key)throw new Error('딜러 ID를 입력해주세요.');await request('/api/dealers/favorite','POST',{source:$('newDealerSource').value,dealer_key:key,display_name:$('newDealerName').value.trim(),phone:$('newDealerPhone').value.trim(),region:$('newDealerRegion').value.trim(),favorite:true});}
+      if(d){const reason=$('blockReason').value.trim();if(!reason)throw new Error('제외 사유를 입력해주세요.');if(!d.dealer_key?.trim()||!d.source?.trim())throw new Error('이 매물에서 딜러 식별 정보(dealer_key)를 확보하지 못해 등록할 수 없습니다');await store.blacklistDealer(d.source,d.dealer_key,reason,dealerPayload(d));}
+      else {const key=$('newDealerId').value.trim();if(!key)throw new Error('딜러 ID를 입력해주세요.');await store.setDealerFavorite($('newDealerSource').value,key,true,{display_name:$('newDealerName').value.trim(),phone:$('newDealerPhone').value.trim(),region:$('newDealerRegion').value.trim()});}
       $('dealerDialog').close();await refreshAfterDealer();notify(d?'블랙리스트에 등록했습니다.':'찜 딜러에 저장했습니다.');
     }catch(err){$('dialogError').textContent=err.message;}finally{button.disabled=false;}
   });
   async function favoriteCar(button){
-    const item=state.history.find(i=>i.id===Number(button.dataset.id));if(!item)return;button.disabled=true;
-    try{const data=await request(`/api/history/${item.id}/favorite`,'PATCH',{favorite:!item.favorite});item.favorite=data.favorite;if(state.view==='detail'){button.setAttribute('aria-pressed',String(item.favorite));button.setAttribute('aria-label',item.favorite?'매물 찜 해제':'매물 찜하기');button.disabled=false;}else renderGarage();notify(item.favorite?'찜한 매물에 저장했습니다.':'매물 찜을 해제했습니다.');}
+    const item=state.history.find(i=>i.id===button.dataset.id);if(!item)return;button.disabled=true;
+    try{item.favorite=await store.setHistoryFavorite(item.id,!item.favorite);if(state.view==='detail'){button.setAttribute('aria-pressed',String(item.favorite));button.setAttribute('aria-label',item.favorite?'매물 찜 해제':'매물 찜하기');button.disabled=false;}else renderGarage();notify(item.favorite?'찜한 매물에 저장했습니다.':'매물 찜을 해제했습니다.');}
     catch(err){notify(err.message,true);button.disabled=false;}
   }
   document.addEventListener('click',async event=>{
@@ -270,7 +279,7 @@
       case 'car-filter':state.filter=button.dataset.value;renderGarage();break;
       case 'show-favorites':state.filter='favorite';renderGarage();break;
       case 'favorite-car':await favoriteCar(button);break;
-      case 'open-car':{const item=state.history.find(i=>i.id===Number(button.dataset.id));openListing(item.listing,item.id,item.url);break;}
+      case 'open-car':{const item=state.history.find(i=>i.id===button.dataset.id);openListing(item.listing,item.id,item.url);break;}
       case 'back':navigate('garage');break;
       case 'edit-verification':state.result=null;renderResult();$('model').focus();break;
       case 'manual':openListing({},null,state.lookupURL);break;
@@ -282,6 +291,7 @@
       case 'add-dealer':openDealerDialog();break;
       case 'dealer-cars':state.related=button.dataset.key;state.filter='all';state.search='';navigate('garage');break;
       case 'clear-related':state.related=null;renderGarage();break;
+      case 'logout':button.disabled=true;await signOut();break;
     }
   });
   document.addEventListener('input',event=>{
@@ -297,5 +307,6 @@
   });
   document.addEventListener('error',event=>{if(event.target.tagName==='IMG')event.target.hidden=true;},true);
   state.view=['garage','lookup','dealers'].includes(location.hash.slice(1))?location.hash.slice(1):'garage';
+  $('accountEmail').textContent=user.email||'개인 보관함';
   updateNavigation();render();loadData().then(()=>render());
-})();
+}

@@ -1,0 +1,17 @@
+{
+  "name": "chabom",
+  "private": true,
+  "type": "module",
+  "description": "차봄 웹 배포 도구 — Firebase CLI, 보안 규칙 테스트, 브라우저 E2E용 SDK",
+  "scripts": {
+    "emulators": "firebase emulators:start --only auth,firestore --project demo-chabom",
+    "test:rules": "firebase emulators:exec --only firestore --project demo-chabom-rules \"node --test tests/rules/firestore_rules.test.mjs\"",
+    "deploy:web": "firebase deploy --only hosting,firestore",
+    "test:e2e": "firebase emulators:exec --only auth,firestore --project demo-chabom \"./.venv/bin/python -m tests.browser_smoke\""
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^5.0.0",
+    "firebase": "12.19.0",
+    "firebase-tools": "^15.0.0"
+  }
+}

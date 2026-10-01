@@ -1,68 +1,65 @@
-"""로컬 전용 매물 검증 서버 (FastAPI) — 2026-09-18 전면 개편.
+"""매물 조회·검증 API 서버 (FastAPI) — 2026-10-01 웹 배포용으로 개편.
 
-**배경**: 이전 버전(마켓플레이스형 실시간 검색)에 사용자가 다섯 가지 심각한 문제를 제기했다:
-(1) robots.txt/봇 차단으로 일괄 크롤링이 원천적으로 불안정, (2) 0~100 합산 점수에 의존하게 되어
-핵심 결함이 있어도 "65점"처럼 그럴듯해 보임, (3) 성능기록부·보험이력처럼 가장 중요한 정보를
-크롤링으로 확보 못함, (4) 필터가 부족해 원치 않는 차종까지 섞여 나옴, (5) 나쁜 매물을 반복해서
-올리는 딜러를 걸러낼 방법이 없음.
+**배경**: 2026-09-18 개편으로 이 프로그램은 "많이 찾아주는 도구"에서 "한 건을 깊게 검증하는
+도구"로 바뀌었다. 사용자가 각 사이트의 자체 검색으로 후보를 찾고, 매물 링크 하나를 주면(또는
+직접 입력하면) 그 한 건만 열어서 검증한다. 판정은 0~100 점수가 아니라 항목별 PASS/FAIL/미확인
+체크리스트이며, 성능기록부·보험이력처럼 크롤링으로 못 가져오는 항목은 사용자가 직접 확인해
+입력하지 않으면 "미확인"으로 게이팅되어 전체 판정이 "보류"로 강제된다(scoring/checklist.py).
 
-그래서 이 프로그램은 **"많이 찾아주는 도구"에서 "한 건을 깊게 검증하는 도구"로 완전히
-바뀌었다.** 사용자가 각 사이트의 뛰어난 자체 검색으로 후보를 직접 찾고(문제 4 해결 — 필터를
-재구현하지 않는다), 매물 링크 하나를 이 서버에 주면(또는 직접 입력하면) 그 한 건만 열어서
-검증한다(문제 1 해결 — 대량 크롤링이 아니라 사람이 링크 하나를 클릭하는 것과 동일한 단발성
-조회라 robots.txt/봇 차단 문제에서 자유롭다). 판정은 0~100 점수가 아니라 항목별
-PASS/FAIL/미확인 체크리스트이며, 성능기록부·보험이력처럼 크롤링으로 못 가져오는 항목은
-**사용자가 직접 확인해서 입력하지 않으면 자동으로 "미확인"으로 게이팅되어 전체 판정이
-"보류"로 강제된다**(문제 2, 3 해결 — scoring/checklist.py 참고, "1종 오류(부실차량을 정상으로
-오판)는 절대 안 된다"는 사용자 원칙을 판정 로직 자체에 박아 넣었다). 딜러는 sqlite에 누적
-저장되어, 한 번 "제외" 등록하면 이후 같은 딜러의 다른 매물을 검증할 때 자동으로 걸린다
-(문제 5 해결 — storage/dealers.py 참고, 이름이 아니라 사이트별 판매자 ID로 식별한다).
+**웹 배포(2026-10-01)**: 여러 사용자가 인터넷에서 쓰도록 바뀌었다.
+- 화면(web/)은 Firebase Hosting이, 로그인은 Firebase Auth(Google·카카오)가 맡는다.
+- 차량 보관함·딜러 기록은 브라우저가 사용자별 Firestore 문서(`users/{uid}/...`)에 직접 저장한다
+  (web/store.js, firestore.rules). 그래서 이 서버는 사용자 데이터를 저장하지 않는다.
+- 이 서버는 Cloud Run(서울)에서 돌며, 브라우저 없이는 할 수 없는 두 가지만 맡는다.
+  `/api/lookup`은 Playwright로 매물 페이지 한 건을 열고, `/api/verify`는 체크리스트를 판정한다.
+- 모든 요청은 Firebase ID 토큰과 허용 이메일 목록으로 검사한다(api/auth.py). 링크 조회는
+  사용자별 일일 한도(LOOKUP_DAILY_LIMIT)를 두고, 한 번에 한 건씩 순서대로 처리한다.
 
-실행:
-    pip install -r requirements.txt
-    playwright install chromium   # 최초 1회
-    python server.py
-    # 브라우저에서 http://localhost:8000 접속
+로컬 개발(Firebase 에뮬레이터 사용)은 README의 "로컬 개발" 절과 docs/deploy.md를 참고한다.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from typing import Optional
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException
-from contextlib import closing
-from pathlib import Path
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from api.auth import FirebaseGateway, User, authorize, bearer_token
+from api.validation import normalize_phone, normalize_url
 from crawler.adapters.bobaedream_adapter import BobaedreamAdapter
 from crawler.adapters.encar_detail_adapter import EncarDetailAdapter
 from crawler.adapters.kbchachacha_adapter import KbchachachaAdapter
 from crawler.adapters.kcar_detail_adapter import KcarDetailAdapter
 from crawler.browser_fetch import BrowserFetcher
+from crawler.rate_limiter import RateLimiter
 from normalizer.schema import Listing
 from scoring.checklist import ChecklistResult, DealerStatus, evaluate_checklist
 from scoring.scorer import load_weights
-from storage import dealers as dealer_store
-from storage import history as history_store
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="차봄 — 내 차를 고르는 공간")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:8000", "http://127.0.0.1:8000"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+DEV_MODE = os.environ.get('CHABOM_DEV') == '1'
+LOOKUP_DAILY_LIMIT = int(os.environ.get('LOOKUP_DAILY_LIMIT', '30'))
+# Firebase Hosting의 Cloud Run rewrite는 60초에 끊긴다. 그 전에 사용자에게 안내 문구로 답한다.
+LOOKUP_TIMEOUT_SEC = float(os.environ.get('LOOKUP_TIMEOUT_SEC', '50'))
+ALLOWED_ORIGINS = [o.strip() for o in os.environ.get('ALLOWED_ORIGINS', '').split(',') if o.strip()]
 
-_fetcher = BrowserFetcher()
+# Playwright 동기 API 객체는 만든 스레드에서만 써야 한다. 브라우저 작업은 전부 이 단일 스레드에서
+# 순서대로 처리한다 — 여러 사용자가 동시에 조회해도 사이트에는 한 번에 한 요청만 간다.
+_browser_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='browser')
+# 컨테이너의 /dev/shm은 작아서 Chromium이 그대로 쓰면 큰 페이지에서 죽는다.
+_fetcher = BrowserFetcher(block_heavy_resources=True, launch_args=['--disable-dev-shm-usage'])
 _weights = load_weights()
-DEALERS_DB_PATH = Path(__file__).parent / "data/dealers.db"
-HISTORY_DB_PATH = Path(__file__).parent / "data/listings.db"
+gateway = FirebaseGateway()
 
 # URL의 호스트로 소스를 식별한다. 링크 1건만 여는 이 엔드포인트는 "사람이 그 링크를 클릭하는
 # 것"과 실질적으로 같은 단발 조회라는 게 이 프로젝트의 판단이다(2026-09-20, 사용자 피드백으로
@@ -70,6 +67,8 @@ HISTORY_DB_PATH = Path(__file__).parent / "data/listings.db"
 # 케이카·엔카는 상세페이지가 지금도 robots.txt에 Disallow로 명시되어 있지만, "자동화된 반복
 # 수집을 막는 규약"과 "사용자가 준 링크 1건을 여는 단발 조회"를 다른 범주로 재해석해 의식적
 # 예외로 지원한다 — 각 어댑터 모듈 docstring 참고(kcar_detail_adapter.py, encar_detail_adapter.py).
+# 웹 공개(2026-10-01) 후에도 사용자 결정으로 네 곳을 모두 유지한다. 대신 허용된 계정만,
+# 사용자별 일일 한도 안에서, 사이트별 간격을 두고 한 건씩 연다 — crawler/compliance.py 참고.
 _SOURCE_HOSTS = {
     "bobaedream.co.kr": ("bobaedream", True),
     "kbchachacha.com": ("kbchachacha", True),
@@ -83,90 +82,121 @@ _ADAPTERS = {
     "kcar": lambda: KcarDetailAdapter(fetcher=_fetcher),
     "encar": lambda: EncarDetailAdapter(fetcher=_fetcher),
 }
+# 사용자가 여럿이어도 같은 사이트를 연달아 두드리지 않도록 사이트별로 간격을 둔다.
+_SOURCE_LIMITERS = {source: RateLimiter(1.0, 3.0) for source in _ADAPTERS}
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    yield
+    # 브라우저는 만든 스레드에서 닫는다. 실행기는 남겨 두어 다음 조회 때 브라우저를 다시 띄운다.
+    _browser_executor.submit(_fetcher.close).result(timeout=30)
+
+
+app = FastAPI(title="차봄 — 내 차를 고르는 공간", lifespan=_lifespan)
+if ALLOWED_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=ALLOWED_ORIGINS,
+        allow_methods=["POST"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
+
+
+def current_user(token: str = Depends(bearer_token)) -> User:
+    return authorize(gateway, token)
 
 
 def _identify_source(url: str) -> tuple[Optional[str], bool]:
     host = urlparse(url).netloc.lower()
     for suffix, (source, supported) in _SOURCE_HOSTS.items():
-        if host.endswith(suffix):
+        if host == suffix or host.endswith('.' + suffix):
             return source, supported
     return None, False
 
 
 class LookupRequest(BaseModel):
-    url: str
+    url: str = Field(max_length=2048)
+
+
+@app.get('/api/health')
+def health() -> dict:
+    return {'ok': True}
 
 
 @app.post("/api/lookup")
-def lookup(req: LookupRequest) -> dict:
+async def lookup(req: LookupRequest, user: User = Depends(current_user)) -> dict:
+    """링크 하나를 열어 정규화된 필드를 돌려준다. 저장은 브라우저가 사용자 Firestore에 한다."""
     try:
-        url = history_store.normalize_url(req.url)
+        url = normalize_url(req.url)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    result = _lookup(LookupRequest(url=url))
-    if result.get('listing'):
-        listing = Listing.from_dict(result['listing'])
-        with closing(dealer_store.get_connection(DEALERS_DB_PATH)) as conn:
-            dealer_store.upsert_dealer(conn, listing.source, listing.dealer.dealer_id,
-                                      display_name=listing.dealer.display_name,
-                                      phone=listing.dealer.phone, region=listing.dealer.region)
-    with closing(history_store.get_connection(HISTORY_DB_PATH)) as conn:
-        result['history_id'] = history_store.record(
-            conn, url, source=_identify_source(url)[0] or '', listing=result.get('listing'),
-            status='success' if result['ok'] else 'failed', reason=result.get('reason', ''),
-        )
-    return result
+    source, supported = _identify_source(url)
+    if source is None or not supported:
+        return {'url': url, 'source': source or '', **_unsupported(url, source)}
+    if not gateway.consume_lookup(user.uid, LOOKUP_DAILY_LIMIT):
+        raise HTTPException(status_code=429,
+                            detail=f'오늘 링크 조회 한도({LOOKUP_DAILY_LIMIT}회)를 모두 썼습니다. 직접 입력은 계속 사용할 수 있습니다.')
+    loop = asyncio.get_running_loop()
+    try:
+        result = await asyncio.wait_for(loop.run_in_executor(_browser_executor, _lookup, url, source),
+                                        timeout=LOOKUP_TIMEOUT_SEC)
+    except asyncio.TimeoutError:
+        logger.warning('단건 조회 시간 초과: %s', url)
+        result = {'ok': False, 'reason': '사이트 응답이 늦어 조회를 마치지 못했습니다. 잠시 후 다시 시도하거나 직접 입력해주세요.'}
+    return {'url': url, 'source': source, **result}
 
 
-@app.get('/api/history')
-def get_history() -> dict:
-    with closing(history_store.get_connection(HISTORY_DB_PATH)) as conn:
-        return {'items': history_store.list_history(conn)}
-
-
-class FavoriteRequest(BaseModel):
-    favorite: bool
-
-
-@app.patch('/api/history/{item_id}/favorite')
-def favorite_history(item_id: int, req: FavoriteRequest) -> dict:
-    with closing(history_store.get_connection(HISTORY_DB_PATH)) as conn:
-        if not history_store.set_favorite(conn, item_id, req.favorite):
-            raise HTTPException(status_code=404, detail='저장된 매물을 찾을 수 없습니다.')
-    return {'ok': True, 'favorite': req.favorite}
-
-
-def _lookup(req: LookupRequest) -> dict:
-    """링크 하나를 열어 정규화된 필드를 미리 채워준다 — 대량 크롤링이 아니라 이 한 건만 연다."""
-    source, supported = _identify_source(req.url)
+def _unsupported(url: str, source: Optional[str]) -> dict:
     if source is None:
-        return {
-            "ok": False,
-            "reason": f"인식할 수 없는 사이트입니다: {req.url}\n직접 입력 모드를 사용하세요.",
-        }
-    if not supported:
-        return {
-            "ok": False,
-            "reason": (
-                f"{source}는 상세페이지가 robots.txt로 막혀 있어 자동으로 열지 않습니다 "
-                "(crawler/compliance.py 참고). 페이지를 직접 열어 보이는 정보를 아래 폼에 입력해주세요."
-            ),
-        }
+        return {"ok": False, "reason": f"인식할 수 없는 사이트입니다: {url}\n직접 입력 모드를 사용하세요."}
+    return {
+        "ok": False,
+        "reason": (
+            f"{source}는 상세페이지가 robots.txt로 막혀 있어 자동으로 열지 않습니다 "
+            "(crawler/compliance.py 참고). 페이지를 직접 열어 보이는 정보를 아래 폼에 입력해주세요."
+        ),
+    }
+
+
+def _lookup(url: str, source: str) -> dict:
+    """브라우저 스레드에서만 호출한다 — 대량 크롤링이 아니라 이 한 건만 연다."""
+    _SOURCE_LIMITERS[source].wait()
     adapter = _ADAPTERS[source]()
     try:
-        listing = adapter.parse_detail(req.url)
+        listing = adapter.parse_detail(url)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("단건 조회 실패: %s (%s)", req.url, exc)
+        logger.warning("단건 조회 실패: %s (%s)", url, exc)
         return {"ok": False, "reason": f"조회에 실패했습니다: {exc}"}
     return {"ok": True, "listing": listing.to_dict()}
 
 
+class DealerRecord(BaseModel):
+    blacklisted: bool = False
+    reason: str = Field(default='', max_length=1000)
+    blacklisted_at: str = Field(default='', max_length=64)
+
+
+class PhoneMatch(BaseModel):
+    source: str = Field(max_length=40)
+    dealer_key: str = Field(max_length=200)
+    display_name: str = Field(default='', max_length=200)
+    reason: str = Field(default='', max_length=1000)
+
+
+class DealerContext(BaseModel):
+    """사용자 본인의 딜러 기록 중 이 매물 판정에 필요한 부분 — 브라우저가 Firestore에서 읽어 보낸다."""
+    record: Optional[DealerRecord] = None
+    phone_matches: list[PhoneMatch] = Field(default_factory=list, max_length=100)
+
+
 class VerifyRequest(BaseModel):
     listing: dict
+    dealer_context: Optional[DealerContext] = None
 
 
 @app.post("/api/verify")
-def verify(req: VerifyRequest) -> dict:
+def verify(req: VerifyRequest, user: User = Depends(current_user)) -> dict:
     """listing 페이로드(정규화 스키마 형태, 부분 입력 가능)를 받아 체크리스트를 평가한다.
 
     프레임손상/침수/전손/보험이력공개 같은 핵심 필드는 자동 조회로 채워지지 않는 게 정상이다 —
@@ -175,121 +205,29 @@ def verify(req: VerifyRequest) -> dict:
     data = dict(req.listing)
     data.setdefault("listing_id", "manual")
     data.setdefault("source", "manual")
-    listing = Listing.from_dict(data)
-
-    conn = dealer_store.get_connection(DEALERS_DB_PATH)
     try:
-        dealer_status = _build_dealer_status(conn, listing)
-    finally:
-        conn.close()
-
+        listing = Listing.from_dict(data)
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise HTTPException(status_code=422, detail='차량 정보 형식이 올바르지 않습니다.') from exc
+    dealer_status = _build_dealer_status(listing, req.dealer_context)
     result = evaluate_checklist(listing, dealer_status=dealer_status, weights=_weights)
-    if listing.url:
-        try:
-            url = history_store.normalize_url(listing.url)
-        except ValueError:
-            pass
-        else:
-            with closing(history_store.get_connection(HISTORY_DB_PATH)) as conn:
-                history_store.record(conn, url, source=listing.source, listing=listing.to_dict())
     return _result_to_dict(result, listing)
 
 
-class BlacklistRequest(BaseModel):
-    source: str
-    dealer_key: str
-    reason: str
-    display_name: str = ""
-    phone: str = ""
-    region: str = ""
-
-
-@app.post("/api/dealers/blacklist")
-def blacklist_dealer(req: BlacklistRequest) -> dict:
-    if not req.dealer_key.strip() or not req.source.strip():
-        return {"ok": False, "reason": "이 매물에서 딜러 식별 정보(dealer_key)를 확보하지 못해 등록할 수 없습니다"}
-    if not req.reason.strip():
-        raise HTTPException(status_code=422, detail='제외 사유를 입력해주세요.')
-    conn = dealer_store.get_connection(DEALERS_DB_PATH)
-    try:
-        dealer_store.blacklist_dealer(
-            conn, req.source, req.dealer_key, req.reason,
-            display_name=req.display_name, phone=req.phone, region=req.region,
-        )
-    finally:
-        conn.close()
-    return {"ok": True}
-
-
-class UnblacklistRequest(BaseModel):
-    source: str
-    dealer_key: str
-
-
-@app.post("/api/dealers/unblacklist")
-def unblacklist_dealer(req: UnblacklistRequest) -> dict:
-    conn = dealer_store.get_connection(DEALERS_DB_PATH)
-    try:
-        dealer_store.unblacklist_dealer(conn, req.source, req.dealer_key)
-    finally:
-        conn.close()
-    return {"ok": True}
-
-
-@app.get("/api/dealers/blacklist")
-def list_blacklist() -> dict:
-    conn = dealer_store.get_connection(DEALERS_DB_PATH)
-    try:
-        rows = dealer_store.list_blacklisted(conn)
-    finally:
-        conn.close()
-    return {"dealers": rows}
-
-
-class DealerFavoriteRequest(BaseModel):
-    source: str
-    dealer_key: str
-    favorite: bool
-    display_name: str = ''
-    phone: str = ''
-    region: str = ''
-
-
-@app.get('/api/dealers')
-def get_dealers() -> dict:
-    with closing(dealer_store.get_connection(DEALERS_DB_PATH)) as conn:
-        return {'dealers': dealer_store.list_dealers(conn)}
-
-
-@app.post('/api/dealers/favorite')
-def favorite_dealer(req: DealerFavoriteRequest) -> dict:
-    if not req.source.strip() or not req.dealer_key.strip():
-        raise HTTPException(status_code=422, detail='사이트와 딜러 ID가 필요합니다.')
-    with closing(dealer_store.get_connection(DEALERS_DB_PATH)) as conn:
-        try:
-            dealer_store.set_favorite(conn, **req.model_dump())
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return {'ok': True, 'favorite': req.favorite}
-
-
-def _build_dealer_status(conn, listing: Listing) -> DealerStatus:
+def _build_dealer_status(listing: Listing, context: Optional[DealerContext]) -> DealerStatus:
     source, dealer_key = listing.source, listing.dealer.dealer_id
     if not dealer_key:
         return DealerStatus(known=False)
-    phone = dealer_store.normalize_phone(listing.dealer.phone)
-    dealer_store.upsert_dealer(conn, source, dealer_key, display_name=listing.dealer.display_name,
-                              phone=listing.dealer.phone, region=listing.dealer.region)
-    record = dealer_store.get_dealer(conn, source, dealer_key)
-    phone_matches = dealer_store.find_by_phone(conn, phone, exclude=(source, dealer_key)) if phone else []
-    if record is None:
-        # 처음 보는 딜러면 이번 조회를 계기로 등록해둔다(블랙리스트 아님 — 나중에 조회/등록용 인덱스).
-        dealer_store.upsert_dealer(conn, source, dealer_key, phone=listing.dealer.phone, region=listing.dealer.region)
-        return DealerStatus(source=source, dealer_key=dealer_key, known=True, phone_matches=phone_matches)
+    context = context or DealerContext()
+    record = context.record or DealerRecord()
+    phone_matches = []
+    if normalize_phone(listing.dealer.phone):
+        phone_matches = [m.model_dump() for m in context.phone_matches
+                         if (m.source, m.dealer_key) != (source, dealer_key)]
     return DealerStatus(
         source=source, dealer_key=dealer_key, known=True,
-        blacklisted=record["blacklisted"], reason=record["reason"] or "",
-        blacklisted_at=record["blacklisted_at"] or "", phone_matches=phone_matches,
+        blacklisted=record.blacklisted, reason=record.reason if record.blacklisted else "",
+        blacklisted_at=record.blacklisted_at if record.blacklisted else "", phone_matches=phone_matches,
     )
 
 
@@ -316,15 +254,18 @@ def _result_to_dict(result: ChecklistResult, listing: Listing) -> dict:
     }
 
 
-@app.on_event("shutdown")
-def _shutdown() -> None:
-    _fetcher.close()
+if DEV_MODE:
+    # 로컬 개발 전용: Hosting이 배포 시 자동으로 제공하는 /__/firebase/init.json을 흉내 내고
+    # 화면도 같은 출처에서 내준다. demo- 프로젝트 ID를 보면 web/firebase.js가 에뮬레이터에 붙는다.
+    @app.get('/__/firebase/init.json')
+    def firebase_init() -> dict:
+        project = os.environ.get('GOOGLE_CLOUD_PROJECT', 'demo-chabom')
+        return {'projectId': project, 'apiKey': 'demo-api-key', 'authDomain': f'{project}.firebaseapp.com'}
 
-
-app.mount("/", StaticFiles(directory="web", html=True), name="web")
+    app.mount("/", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "web"), html=True), name="web")
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run(app, host=os.environ.get('HOST', '127.0.0.1'), port=int(os.environ.get('PORT', '8000')))

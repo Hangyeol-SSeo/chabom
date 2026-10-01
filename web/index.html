@@ -6,13 +6,20 @@
   <meta name="color-scheme" content="light">
   <title>차봄 · 내 차를 고르는 공간</title>
   <link rel="stylesheet" href="/app.css">
-  <script src="/app.js" defer></script>
+  <script type="module" src="/main.js"></script>
 </head>
 <body>
   <a class="skip-link" href="#main">본문으로 건너뛰기</a>
-  <div class="app-shell">
+  <section id="authScreen" class="auth-screen" aria-live="polite">
+    <div class="auth-card">
+      <span class="brand auth-brand"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>차봄</span>
+      <div id="authBody"><p class="subtitle">불러오는 중…</p></div>
+    </div>
+  </section>
+  <div class="app-shell" hidden>
     <aside class="sidebar">
       <a class="brand" href="#garage" aria-label="차봄 차량 보관함"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>차봄<span class="brand-caption">내 차를 고르는 공간</span></a>
+      <button class="mobile-logout button quiet small" data-action="logout">로그아웃</button>
       <nav aria-label="주 메뉴">
         <a href="#garage" data-nav="garage"><span data-icon="garage"></span>차량 보관함<span class="nav-count" id="garageCount">0</span></a>
         <a href="#lookup" data-nav="lookup"><span data-icon="search"></span>매물 확인</a>
@@ -20,7 +27,7 @@
       </nav>
     </aside>
     <div class="workspace">
-      <header class="topbar"><span id="breadcrumb">차량 보관함</span><span class="private-label"><span data-icon="lock"></span>개인 보관함</span></header>
+      <header class="topbar"><span id="breadcrumb">차량 보관함</span><span class="account"><span class="private-label"><span data-icon="lock"></span><span id="accountEmail">개인 보관함</span></span><button class="button quiet small" data-action="logout">로그아웃</button></span></header>
       <div id="connectionError" class="connection-error" role="alert" hidden></div>
       <main id="main" tabindex="-1"></main>
     </div>

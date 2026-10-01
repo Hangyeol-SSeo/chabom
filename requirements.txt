@@ -1,8 +1,6 @@
-requests>=2.31
 beautifulsoup4>=4.12
-lxml>=5.0
 PyYAML>=6.0
-pytest>=8.0
-playwright>=1.45      # 실브라우저 기반 검색(crawler/browser_fetch.py) — 설치 후 `playwright install chromium` 1회 필요
+playwright>=1.45      # 실브라우저 기반 조회(crawler/browser_fetch.py) — 설치 후 `playwright install chromium` 1회 필요
 fastapi>=0.110
 uvicorn>=0.29
+firebase-admin>=6.5   # ID 토큰 검증, 허용 목록·조회 한도(api/auth.py)

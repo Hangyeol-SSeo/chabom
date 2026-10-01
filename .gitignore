@@ -10,3 +10,7 @@ data/
 *.log
 .coverage
 htmlcov/
+node_modules/
+.firebaserc
+firebase-debug.log
+firestore-debug.log

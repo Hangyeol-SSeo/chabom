@@ -26,8 +26,15 @@ _DEFAULT_USER_AGENT = (
 class BrowserFetcher:
     """헤드리스 Chromium 세션 하나를 여러 어댑터/요청이 공유하는 래퍼."""
 
-    def __init__(self, headless: bool = True):
+    # 웹 서버(Cloud Run)에서는 이미지·폰트·미디어를 받지 않는다. 어댑터는 사진 URL만 읽고
+    # 실제 이미지를 쓰지 않으므로 결과는 같고, 조회 시간과 메모리·네트워크 사용량이 줄어든다.
+    _BLOCKED_RESOURCE_TYPES = frozenset({"image", "font", "media"})
+
+    def __init__(self, headless: bool = True, block_heavy_resources: bool = False,
+                 launch_args: Optional[list[str]] = None):
         self._headless = headless
+        self._block_heavy_resources = block_heavy_resources
+        self._launch_args = list(launch_args or [])
         self._pw = None
         self._browser = None
         self._context = None
@@ -40,11 +47,19 @@ class BrowserFetcher:
         from playwright.sync_api import sync_playwright
 
         self._pw = sync_playwright().start()
-        self._browser = self._pw.chromium.launch(headless=self._headless)
+        self._browser = self._pw.chromium.launch(headless=self._headless, args=self._launch_args)
         self._context = self._browser.new_context(
             user_agent=_DEFAULT_USER_AGENT,
             locale="ko-KR",
         )
+        if self._block_heavy_resources:
+            self._context.route("**/*", self._route_request)
+
+    def _route_request(self, route) -> None:
+        if route.request.resource_type in self._BLOCKED_RESOURCE_TYPES:
+            route.abort()
+        else:
+            route.continue_()
 
     def get_html(
         self,
