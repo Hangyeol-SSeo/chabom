@@ -27,21 +27,24 @@ PASS/FAIL/미확인 체크리스트이며, 성능기록부·보험이력처럼 �
 from __future__ import annotations
 
 import logging
+import re
 from typing import Optional
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from contextlib import closing
 from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from crawler.adapters.bobaedream_adapter import BobaedreamAdapter
-from crawler.adapters.encar_detail_adapter import EncarDetailAdapter
+from crawler.adapters.encar_detail_adapter import AUTH_STATE_PATH, EncarDetailAdapter
+from crawler.encar_session import EncarSessionManager
 from crawler.adapters.kbchachacha_adapter import KbchachachaAdapter
-from crawler.adapters.kcar_detail_adapter import KcarDetailAdapter
-from crawler.browser_fetch import BrowserFetcher
+from crawler.adapters.kcar_detail_adapter import AUTH_STATE_PATH as KCAR_AUTH_STATE_PATH, KcarDetailAdapter
+from crawler.site_session import SiteSessionManager
 from normalizer.schema import Listing
 from scoring.checklist import ChecklistResult, DealerStatus, evaluate_checklist
 from scoring.scorer import load_weights
@@ -59,7 +62,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_fetcher = BrowserFetcher()
+_encar_session = EncarSessionManager(AUTH_STATE_PATH)
+_kcar_session = SiteSessionManager(KCAR_AUTH_STATE_PATH, "https://www.kcar.com/")
 _weights = load_weights()
 DEALERS_DB_PATH = Path(__file__).parent / "data/dealers.db"
 HISTORY_DB_PATH = Path(__file__).parent / "data/listings.db"
@@ -77,11 +81,15 @@ _SOURCE_HOSTS = {
     "encar.com": ("encar", True),
 }
 
+# 어댑터는 조회마다 새로 만들고, 각자 자기 브라우저 세션을 연다(_lookup에서 같은 스레드로 닫는다).
+# Playwright sync 세션은 만든 스레드에서만 쓰고 닫을 수 있고 한 스레드에 하나만 열 수 있어서,
+# 서버 전체가 세션 하나를 공유하면 요청 스레드가 바뀌거나 다른 사이트를 이어서 조회할 때 실패한다.
+# Encar·K Car는 저장된 탐색 세션 파일도 이렇게 조회마다 새 컨텍스트에 반영된다.
 _ADAPTERS = {
-    "bobaedream": lambda: BobaedreamAdapter(fetcher=_fetcher),
-    "kbchachacha": lambda: KbchachachaAdapter(fetcher=_fetcher),
-    "kcar": lambda: KcarDetailAdapter(fetcher=_fetcher),
-    "encar": lambda: EncarDetailAdapter(fetcher=_fetcher),
+    "bobaedream": BobaedreamAdapter,
+    "kbchachacha": KbchachachaAdapter,
+    "kcar": KcarDetailAdapter,
+    "encar": EncarDetailAdapter,
 }
 
 
@@ -97,13 +105,98 @@ class LookupRequest(BaseModel):
     url: str
 
 
+class EncarSessionCompleteRequest(BaseModel):
+    url: str = ""
+
+
+def _encar_history_probe_url(url: str) -> str:
+    candidates = [url] if url else []
+    if not candidates:
+        with closing(history_store.get_connection(HISTORY_DB_PATH)) as conn:
+            candidates = [item.get("url", "") for item in history_store.list_history(conn) if item.get("source") == "encar"]
+    for candidate in candidates:
+        parsed = urlparse(candidate)
+        match = re.fullmatch(r"/cars/detail/(\d+)", parsed.path)
+        if parsed.scheme == "https" and parsed.hostname == "fem.encar.com" and match:
+            return f"https://car.encar.com/history?carId={match.group(1)}"
+    raise HTTPException(status_code=422, detail="로그인을 확인할 엔카 매물 링크가 필요합니다.")
+
+
+def _require_local_json(request: Request) -> None:
+    origin = request.headers.get("origin")
+    expected_origin = f"{request.url.scheme}://{request.url.netloc}"
+    if request.url.hostname not in {"127.0.0.1", "localhost"} or (origin and origin != expected_origin):
+        raise HTTPException(status_code=403, detail="로컬 차봄 화면에서만 로그인 연결을 시작할 수 있습니다.")
+    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+        raise HTTPException(status_code=415, detail="JSON 요청이 필요합니다.")
+
+
+@app.get("/api/encar/session")
+def encar_session_status() -> dict:
+    return {"status": _encar_session.status()}
+
+
+@app.post("/api/encar/session/start")
+async def encar_session_start(request: Request) -> dict:
+    _require_local_json(request)
+    try:
+        return {"status": await _encar_session.start()}
+    except Exception as exc:
+        logger.warning("Encar 로그인 창 열기 실패: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="엔카 로그인 창을 열지 못했습니다. 브라우저 실행 상태를 확인해주세요.") from None
+
+
+@app.post("/api/encar/session/complete")
+async def encar_session_complete(request: Request, req: EncarSessionCompleteRequest) -> dict:
+    _require_local_json(request)
+    history_url = _encar_history_probe_url(req.url)
+    try:
+        return {"status": await _encar_session.complete(history_url)}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+
+
+@app.post("/api/encar/session/cancel")
+async def encar_session_cancel(request: Request) -> dict:
+    _require_local_json(request)
+    return {"status": await _encar_session.cancel()}
+
+
+@app.get("/api/kcar/session")
+def kcar_session_status() -> dict:
+    return {"status": _kcar_session.status()}
+
+
+@app.post("/api/kcar/session/start")
+async def kcar_session_start(request: Request) -> dict:
+    _require_local_json(request)
+    try:
+        return {"status": await _kcar_session.start()}
+    except Exception as exc:
+        logger.warning("K Car 탐색 창 열기 실패: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="케이카 창을 열지 못했습니다. 브라우저 실행 상태를 확인해주세요.") from None
+
+
+@app.post("/api/kcar/session/cancel")
+async def kcar_session_cancel(request: Request) -> dict:
+    _require_local_json(request)
+    return {"status": await _kcar_session.cancel()}
+
+
 @app.post("/api/lookup")
-def lookup(req: LookupRequest) -> dict:
+async def lookup(req: LookupRequest) -> dict:
     try:
         url = history_store.normalize_url(req.url)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    result = _lookup(LookupRequest(url=url))
+    source = _identify_source(url)[0]
+    session = {"encar": _encar_session, "kcar": _kcar_session}.get(source)
+    if session:
+        try:
+            await session.snapshot()
+        except Exception as exc:
+            logger.warning("%s 탐색 창 세션 저장 실패: %s", source, type(exc).__name__)
+    result = await run_in_threadpool(_lookup, LookupRequest(url=url))
     if result.get('listing'):
         listing = Listing.from_dict(result['listing'])
         with closing(dealer_store.get_connection(DEALERS_DB_PATH)) as conn:
@@ -118,10 +211,30 @@ def lookup(req: LookupRequest) -> dict:
     return result
 
 
+def _stored_check(dealer_conn, listing: Optional[dict]) -> Optional[dict]:
+    """저장된 매물을 그대로 판정한다 — 목록·상세에서 결격 사유를 누르지 않고 바로 보여주기 위함."""
+    if not listing:
+        return None
+    try:
+        parsed = Listing.from_dict({"listing_id": "manual", "source": "manual", **listing})
+        dealer_status = _build_dealer_status(dealer_conn, parsed, remember=False)
+        result = evaluate_checklist(parsed, dealer_status=dealer_status, weights=_weights)
+    except Exception as exc:  # noqa: BLE001 — 옛 형식의 저장본 하나 때문에 목록 전체가 막히면 안 된다
+        logger.info("저장된 매물 판정 실패: %s", type(exc).__name__)
+        return None
+    check = _result_to_dict(result, parsed)
+    del check["listing"], check["dealer_status"]
+    return check
+
+
 @app.get('/api/history')
 def get_history() -> dict:
     with closing(history_store.get_connection(HISTORY_DB_PATH)) as conn:
-        return {'items': history_store.list_history(conn)}
+        items = history_store.list_history(conn)
+    with closing(dealer_store.get_connection(DEALERS_DB_PATH)) as conn:
+        for item in items:
+            item['check'] = _stored_check(conn, item['listing'])
+    return {'items': items}
 
 
 class FavoriteRequest(BaseModel):
@@ -158,6 +271,11 @@ def _lookup(req: LookupRequest) -> dict:
     except Exception as exc:  # noqa: BLE001
         logger.warning("단건 조회 실패: %s (%s)", req.url, exc)
         return {"ok": False, "reason": f"조회에 실패했습니다: {exc}"}
+    finally:
+        try:
+            adapter.fetcher.close()
+        except Exception as exc:  # noqa: BLE001 — 세션 정리 실패가 조회 결과를 가리면 안 된다
+            logger.warning("브라우저 세션 정리 실패: %s", type(exc).__name__)
     return {"ok": True, "listing": listing.to_dict()}
 
 
@@ -169,8 +287,8 @@ class VerifyRequest(BaseModel):
 def verify(req: VerifyRequest) -> dict:
     """listing 페이로드(정규화 스키마 형태, 부분 입력 가능)를 받아 체크리스트를 평가한다.
 
-    프레임손상/침수/전손/보험이력공개 같은 핵심 필드는 자동 조회로 채워지지 않는 게 정상이다 —
-    사용자가 화면에서 직접 확인해 넣지 않으면 evaluate_checklist()가 "미확인"으로 게이팅한다.
+    원본 화면에서 확인된 핵심 필드만 자동 반영한다. 확인되지 않은 항목은 사용자가
+    직접 확인해 넣지 않으면 evaluate_checklist()가 "미확인"으로 게이팅한다.
     """
     data = dict(req.listing)
     data.setdefault("listing_id", "manual")
@@ -273,18 +391,21 @@ def favorite_dealer(req: DealerFavoriteRequest) -> dict:
     return {'ok': True, 'favorite': req.favorite}
 
 
-def _build_dealer_status(conn, listing: Listing) -> DealerStatus:
+def _build_dealer_status(conn, listing: Listing, remember: bool = True) -> DealerStatus:
+    """`remember=False`면 딜러를 새로 등록·갱신하지 않고 읽기만 한다(목록 조회용)."""
     source, dealer_key = listing.source, listing.dealer.dealer_id
     if not dealer_key:
         return DealerStatus(known=False)
     phone = dealer_store.normalize_phone(listing.dealer.phone)
-    dealer_store.upsert_dealer(conn, source, dealer_key, display_name=listing.dealer.display_name,
-                              phone=listing.dealer.phone, region=listing.dealer.region)
+    if remember:
+        dealer_store.upsert_dealer(conn, source, dealer_key, display_name=listing.dealer.display_name,
+                                  phone=listing.dealer.phone, region=listing.dealer.region)
     record = dealer_store.get_dealer(conn, source, dealer_key)
     phone_matches = dealer_store.find_by_phone(conn, phone, exclude=(source, dealer_key)) if phone else []
     if record is None:
         # 처음 보는 딜러면 이번 조회를 계기로 등록해둔다(블랙리스트 아님 — 나중에 조회/등록용 인덱스).
-        dealer_store.upsert_dealer(conn, source, dealer_key, phone=listing.dealer.phone, region=listing.dealer.region)
+        if remember:
+            dealer_store.upsert_dealer(conn, source, dealer_key, phone=listing.dealer.phone, region=listing.dealer.region)
         return DealerStatus(source=source, dealer_key=dealer_key, known=True, phone_matches=phone_matches)
     return DealerStatus(
         source=source, dealer_key=dealer_key, known=True,
@@ -317,8 +438,9 @@ def _result_to_dict(result: ChecklistResult, listing: Listing) -> dict:
 
 
 @app.on_event("shutdown")
-def _shutdown() -> None:
-    _fetcher.close()
+async def _shutdown() -> None:
+    await _encar_session.close()
+    await _kcar_session.close()
 
 
 app.mount("/", StaticFiles(directory="web", html=True), name="web")

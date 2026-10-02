@@ -10,7 +10,8 @@
   됨)도 FAIL과 동일하게 "구매 보류"를 강제한다** — "모르겠으면 안 사면 된다"를 점수가 아니라
   판정 로직 자체에 박아 넣었다.
 - 핵심이 아닌 항목(참고 정보 — 가격, 주행거리, 명의변경 횟수 등)은 게이팅하지 않고 그냥 보여만
-  준다.
+  준다. 명의변경 횟수와 외판(뼈대가 아닌 부위) 교환·판금은 많을수록 불리하지만 그 자체로 걸러야
+  하는 사유는 아니라서 "결격(fail)"이 아닌 "주의(caution)"로 표시한다(2026-10-02, 사용자 요청).
 - 딜러 블랙리스트(storage/dealers.py) 매치는 다른 모든 항목과 무관하게 최우선으로 게이팅한다.
 
 기존 scoring/rules.py의 정합성 교차검증(check_unexplained_mismatch)은 그대로 재사용한다 — 이건
@@ -26,7 +27,7 @@ from normalizer.schema import Listing
 from scoring.rules import check_unexplained_mismatch
 from scoring.scorer import load_weights
 
-Verdict = str  # "pass" | "fail" | "unknown"
+Verdict = str  # "pass" | "fail" | "unknown" | "caution"(핵심이 아닌 항목 전용 — 게이팅하지 않음)
 
 
 @dataclass
@@ -86,9 +87,10 @@ def _frame_damage_item(listing: Listing) -> ChecklistItem:
             critical=True,
         )
     if frame_ok is False:
+        parts = listing.performance_record.frame_damage
         return ChecklistItem(
             "frame_damage", "프레임(뼈대) 손상", "fail",
-            "손상 이력이 확인되었습니다 — 원칙적으로 배제 대상",
+            f"손상 이력이 확인되었습니다{'(' + ', '.join(parts) + ')' if parts else ''} — 원칙적으로 배제 대상",
             critical=True,
         )
     return ChecklistItem("frame_damage", "프레임(뼈대) 손상", "pass", "무손상으로 확인되었습니다", critical=True)
@@ -124,10 +126,17 @@ def _insurance_history_item(listing: Listing) -> ChecklistItem:
         total_days = sum(
             (p.end and p.start and _days_between(p.start, p.end)) or 0 for p in ih.info_unavailable_periods
         )
+        gap_length = f"약 {total_days}일" if total_days else "기간 미확인"
         return ChecklistItem(
             "insurance_history", "보험이력 조회", "fail",
-            f"이력 조회는 가능하나 정보 공백 기간이 있습니다(약 {total_days}일) — 자차보험 미가입 기간 동안의 "
+            f"이력 조회는 가능하나 정보 공백 기간이 있습니다({gap_length}) — 자차보험 미가입 기간 동안의 "
             "사고 이력이 누락됐을 수 있습니다",
+            critical=True,
+        )
+    if not ih.coverage_verified and listing.source in {"encar", "kcar"}:
+        return ChecklistItem(
+            "insurance_history", "보험이력 조회", "unknown",
+            "차량이력 요약만으로는 자차 보험 미가입 기간이 없다고 확인할 수 없습니다 — 상세 이력 확인 필요",
             critical=True,
         )
     return ChecklistItem("insurance_history", "보험이력 조회", "pass", "이력 조회 가능, 공백 기간 없음", critical=True)
@@ -163,20 +172,39 @@ def _informational_items(listing: Listing) -> list[ChecklistItem]:
             critical=True,  # 사용자가 일반 매매를 찾고 있다면 이것도 사실상 치명적 — 게이팅
         ))
 
-    items.append(ChecklistItem(
-        "owner_change", "명의변경 이력", "pass" if ih.owner_change_count <= 1 else "fail",
-        f"명의변경 {ih.owner_change_count}회" + ("(단독 소유 추정)" if ih.owner_change_count <= 1 else ""),
-        critical=False,
-    ))
+    if ih.owner_change_count is None:
+        items.append(ChecklistItem("owner_change", "명의변경 이력", "unknown", "소유자 변경 횟수와 날짜가 확인되지 않았습니다", critical=False))
+    elif ih.owner_change_count <= 1:
+        items.append(ChecklistItem(
+            "owner_change", "명의변경 이력", "pass",
+            f"명의변경 {ih.owner_change_count}회(단독 소유 추정)", critical=False,
+        ))
+    else:
+        items.append(ChecklistItem(
+            "owner_change", "명의변경 이력", "caution",
+            f"명의변경 {ih.owner_change_count}회 — 횟수가 많을수록 불리하지만 그 자체로 결격 사유는 아닙니다",
+            critical=False,
+        ))
 
     if ih.usage_history.any_commercial_use():
         kinds = ", ".join(k for k, used in [("렌트", ih.usage_history.rental_used), ("택시", ih.usage_history.taxi_used), ("영업용", ih.usage_history.business_used)] if used)
         items.append(ChecklistItem("commercial_use", "영업용 이력", "fail", f"{kinds} 이력이 확인되었습니다", critical=False))
 
-    if pr.panel_exchange:
+    # 케이카는 부위 목록 대신 진단 건수 요약(panel_exchange_count)만 준다 — 이때는 "N곳"으로 세지 않는다.
+    panel_work = [*pr.panel_exchange, *pr.panel_repairs]
+    summarized = pr.panel_exchange_count is not None
+    if panel_work:
+        scope = "이력" if summarized else f"{len(panel_work)}곳"
         items.append(ChecklistItem(
-            "panel_exchange", "외판(패널) 교환", "fail",
-            f"교환 이력 확인: {', '.join(pr.panel_exchange)} — 프레임 손상은 아니지만 사고 이력의 방증일 수 있음",
+            "panel_exchange", "외판(패널) 교환·판금", "caution",
+            f"외판 수리 {scope}: {', '.join(panel_work)} — 뼈대 손상은 아니라 결격 사유는 아니지만, "
+            "부위가 많을수록 불리합니다",
+            critical=False,
+        ))
+    elif summarized or (pr.record_available and not pr.record_images):
+        # 기록부가 이미지로만 있으면 부위를 읽지 못한 것이므로 "이력 없음"이라고 단정하지 않는다.
+        items.append(ChecklistItem(
+            "panel_exchange", "외판(패널) 교환·판금", "pass", "확인된 외판 교환·판금 이력이 없습니다",
             critical=False,
         ))
 

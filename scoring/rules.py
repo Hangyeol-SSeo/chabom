@@ -79,14 +79,14 @@ def is_light_car(listing: Listing, weights: dict) -> bool:
 def rule_single_owner(listing: Listing, weights: dict) -> Optional[RuleResult]:
     count = listing.insurance_history.owner_change_count
     w = weights["risk_rules"]
-    if count <= 1:
+    if count is not None and count <= 1:
         return RuleResult("single_owner", w["single_owner_bonus"], "1인 소유(명의변경 이력 없음)", "높음")
     return None
 
 
 def rule_owner_change_penalty(listing: Listing, weights: dict) -> Optional[RuleResult]:
     count = listing.insurance_history.owner_change_count
-    if count <= 1:
+    if count is None or count <= 1:
         return None
     w = weights["risk_rules"]
     per_change = w["owner_change_penalty_light_car"] if is_light_car(listing, weights) else w["owner_change_penalty"]

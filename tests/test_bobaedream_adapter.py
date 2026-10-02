@@ -155,3 +155,134 @@ def test_build_verification_links_without_popup_link_falls_back_gracefully():
     labels = [l.label for l in links]
     assert "보험이력 상세 조회(보배드림)" not in labels
     assert "카히스토리 공식 조회(보험개발원)" in labels
+
+
+# -- 성능점검기록부 ("성능점검" 섹션의 상세보기 팝업) -----------------------------------
+
+INFO_CHECK_HTML = """
+<div class="info-check">
+  <div class="top-state"><dl><dd>판금 <b>1</b> 회</dd><dd>교환 <b>2</b> 회</dd><dd>부식 <b>0</b> 회</dd></dl></div>
+  <button type="button" class="btn-view-more"
+    onclick="fNewWin('/mycar/popup/mycarChart_5.php?zone=M&amp;cno=0000000&amp;tbl=mycar', '870', '700')">상세보기</button>
+</div>
+"""
+
+
+def _state_rows(rows: list[tuple[str, str]]) -> str:
+    """rows: (부위 제목, 표시된 열). 열은 change/weld/corr 중 하나이거나 빈 문자열(이상 없음)."""
+    labels = {"change": "교환", "weld": "판금/용접", "corr": "부식"}
+    html = ""
+    for part, marked in rows:
+        cells = "".join(
+            f'<td><span class="i-mark {name}">{labels[name]}</span></td>' if name == marked else "<td></td>"
+            for name in ("change", "weld", "corr")
+        )
+        html += f"<tr><th>{part}</th>{cells}</tr>"
+    return html
+
+
+def _performance_html(panel_rows, frame_rows, leak_value="없음") -> str:
+    head = "<thead><tr><th>구분</th><th>교환(교체)</th><th>판금/용접</th><th>부식</th></tr></thead>"
+    return f"""
+    <div class="popup-content p-performance-check">
+      <div class="popup-section"><div class="tbl-01 mode-bg"><table><tbody>
+        <tr><th>사고유무<br>(단순수리제외)</th><td>무</td><th>침수유무</th><td>무</td></tr>
+        <tr><th rowspan="2">자가진단사항</th><td>원동기 양호</td><th rowspan="2">배출가스</th><td rowspan="2">매연 : 0%</td></tr>
+        <tr><td>변속기 양호</td></tr>
+      </tbody></table></div></div>
+      <div class="popup-section check-list"><div class="tbl-01 mode-bg"><table>
+        <thead><tr><th>주요장치</th><th>항목</th><th>해당부품</th><th>상태</th></tr></thead>
+        <tbody>
+          <tr><th rowspan="4">원동기</th><th rowspan="2">오일누유</th><th>실린더헤드</th><td>{leak_value}</td></tr>
+          <tr><th>실린더블럭</th><td>없음</td></tr>
+          <tr><th rowspan="2">냉각수 누수</th><th>워터펌프</th><td>없음</td></tr>
+          <tr><th>냉각수량 및 오염</th><td>적정</td></tr>
+          <tr><th>제동</th><th colspan="2">브레이크 오일 누유</th><td>양호</td></tr>
+        </tbody></table></div></div>
+      <div class="popup-section check-list"><div class="wrap-history-list">
+        <div class="tbl-02 mode-bg" id="ex_history"><table>{head}<tbody>{_state_rows(panel_rows)}</tbody></table></div>
+        <div class="tbl-02 mode-bg" id="in_history"><table>{head}<tbody>{_state_rows(frame_rows)}</tbody></table></div>
+      </div></div>
+    </div>
+    """
+
+
+def _parse_performance(html: str):
+    adapter = BobaedreamAdapter.__new__(BobaedreamAdapter)
+    return adapter._parse_performance_record(BeautifulSoup(html, "html.parser"))
+
+
+def test_performance_popup_url_is_read_from_detail_page():
+    adapter = BobaedreamAdapter.__new__(BobaedreamAdapter)
+    assert adapter._find_performance_popup_url(_soup()) is None
+    soup = BeautifulSoup(INFO_CHECK_HTML, "html.parser")
+    url = adapter._find_performance_popup_url(soup)
+    assert url == "https://bobaedream.example.com/mycar/popup/mycarChart_5.php?zone=M&cno=0000000&tbl=mycar"
+    labels = {l.label: l.url for l in adapter._build_verification_links(soup, "https://bobaedream.example.com/x")}
+    assert labels["성능점검기록부 원본(보배드림)"] == url
+    assert "성능점검기록부 확인 안내" not in labels
+
+
+def test_performance_record_clean_car_confirms_frame_ok():
+    record = _parse_performance(_performance_html(
+        [("1. 후드", ""), ("2. 프론트 휀더(좌)", "")], [("1. 프론트 패널", ""), ("22. 리어 패널", "")],
+    ))
+    assert record.record_available is True
+    assert record.panel_exchange == record.panel_repairs == record.frame_damage == record.leak_records == []
+    assert record.third_party_inspection.frame_ok is True
+    assert record.inspection_results["원동기 · 오일누유 · 실린더블럭"] == "없음"
+    assert record.inspection_results["원동기 · 냉각수 누수 · 냉각수량 및 오염"] == "적정"
+    assert record.inspection_results["제동 · 브레이크 오일 누유"] == "양호"
+    assert record.inspection_results["사고유무 (단순수리제외)"] == "무"
+    assert "자가진단사항 · 배출가스" not in record.inspection_results
+
+
+def test_performance_record_separates_panel_work_from_frame_damage():
+    record = _parse_performance(_performance_html(
+        [("3. 프론트 휀더(우)", "change"), ("7. 리어 도어(우)", "weld"), ("13.사이드실 패널(좌)", "corr")],
+        [("1. 프론트 패널", ""), ("22. 리어 패널", "change")],
+        leak_value="미세누유",
+    ))
+    assert record.panel_exchange == ["프론트 휀더(우) · 교환"]
+    assert record.panel_repairs == ["리어 도어(우) · 판금/용접", "사이드실 패널(좌) · 부식"]
+    assert record.frame_damage == ["리어 패널 · 교환"]
+    assert record.third_party_inspection.frame_ok is False
+    assert record.leak_records == ["원동기 · 오일누유 · 실린더헤드: 미세누유"]
+
+
+def test_performance_record_registered_as_image_stays_unknown():
+    record = _parse_performance(
+        '<div class="popup-content p-certificate car"><div class="scroll-area">'
+        '<img src="//images.example.com/confirm/record_1.jpg"></div></div>'
+    )
+    assert record.record_available is False
+    assert record.third_party_inspection.frame_ok is None  # 판독 불가 — 미확인으로 남겨 보류시킨다
+    assert record.record_images == ["https://images.example.com/confirm/record_1.jpg"]
+
+
+def test_parse_detail_reads_performance_popup_once():
+    class Fetcher:
+        def __init__(self):
+            self.urls = []
+
+        def get_html(self, url, timeout_sec=20.0):
+            self.urls.append(url)
+            if "mycarChart_5" in url:
+                return _performance_html([("3. 프론트 휀더(우)", "change")], [("1. 프론트 패널", "")])
+            return DETAIL_HTML.replace("</body>", INFO_CHECK_HTML + "</body>")
+
+    class NoWait:
+        def wait(self):
+            pass
+
+    fetcher = Fetcher()
+    adapter = BobaedreamAdapter(fetcher=fetcher, rate_limiter=NoWait())
+    listing = adapter.parse_detail("https://bobaedream.example.com/mycar/mycar_view.php?no=0000000&gubun=K")
+    assert [u for u in fetcher.urls if "mycarChart_5" in u] == [
+        "https://bobaedream.example.com/mycar/popup/mycarChart_5.php?zone=M&cno=0000000&tbl=mycar"
+    ]
+    assert listing.performance_record.record_url == fetcher.urls[-1]
+    assert listing.performance_record.panel_exchange == ["프론트 휀더(우) · 교환"]
+    assert listing.performance_record.third_party_inspection.frame_ok is True
+    restored = type(listing).from_dict(listing.to_dict())
+    assert restored.performance_record.panel_exchange == ["프론트 휀더(우) · 교환"]

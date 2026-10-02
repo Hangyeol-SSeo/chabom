@@ -1,39 +1,14 @@
-"""엔카 상세페이지 단건 조회 (2026-09-20 신설, `server.py`의 `/api/lookup` 전용).
+"""사용자가 제공한 Encar 매물 한 건의 렌더링된 상세·이력·성능 화면을 읽는다.
 
-**배경**: 사용자가 명시적으로 "엔카가 제일 중요하다"며 실제 매물 링크를 주고 조사를 요청했다.
-`crawler/adapters/blocked_adapter.py::EncarAdapter`는 여전히 대량 크롤링을 전면 차단하는
-스텁으로 남겨둔다 — 이 모듈은 그것과 별개로, **사용자가 직접 준 링크 1건만 여는** 단발성
-조회 전용이다(케이카 단건 조회와 동일한 정책적 판단, `kcar_detail_adapter.py` 모듈 docstring
-참고: "링크 1건을 여는 것은 자동화된 반복 수집이 아니라 사람이 그 링크를 클릭하는 것과
-같다").
-
-**실측 결과**:
-- 실제 매물 상세 URL은 `https://fem.encar.com/cars/detail/{id}`다. 이 경로는 `fem.encar.com/
-  robots.txt`에 `Disallow: /cars/detail/`로 명시되어 있다 — 케이카 때와 달리 "알고 보니 안
-  막혀 있었다"가 아니라, 위 정책적 판단에 따라 의식적으로 예외 처리한 것이다.
-- 페이지가 렌더링될 때 브라우저가 자동으로 `api.encar.com/v1/readside/...`를 호출해 보험이력/
-  성능점검 데이터를 채운다. `api.encar.com/robots.txt`는 `Disallow: /`(전체 차단)이므로 **이
-  모듈은 그 API를 절대 직접 호출하지 않는다** — Playwright가 페이지를 렌더링하며 자연스럽게
-  발생시키는 부수 요청만 허용하고(사용자가 이 URL을 직접 브라우저로 열어도 똑같이 발생하는
-  요청이다), 최종 렌더링된 페이지의 DOM/상태만 읽는다(케이카 어댑터와 동일한 원칙).
-- 케이카와 달리 워밍업(검색 페이지 선방문) 없이 콜드 스타트로도 실데이터가 바로 렌더링됐다.
-- 페이지에 `window.__PRELOADED_STATE__`라는 구조화된 JSON 상태 객체가 있어(Redux 스타일),
-  제조사/모델/가격/주행거리/연료/변속기/딜러 연락처 등 대부분의 핵심 필드를 이 객체에서 바로
-  읽을 수 있다 — DOM 텍스트를 긁는 것보다 훨씬 안정적이다. 다만 사고/보험이력(`cars.accident`)은
-  이 객체에 채워지지 않는다(비동기로 나중에 불러와 DOM에만 반영됨) — 그 부분만 렌더링된 DOM의
-  "차량이력" 섹션(`data-impression="차량이력"`, 해시되지 않은 안정적 속성)에서 읽는다.
-
-**중요한 한계**: "차량이력" 섹션은 내차피해/타차가해 금액·건수는 명확히 구조화되어 있지만,
-"특이 사항"이 정확히 무엇을 포괄하는지(전손·침수·도난·용도이력 등) 실측만으로는 확정할 수
-없었다. 그래서 이 필드의 "없음"은 flood_damage/total_loss/theft를 자동으로 False로 채우는
-근거로 쓰지 않는다(과대 확신 방지) — 반대로 "전손"/"침수"/"도난" 키워드가 명시적으로 나오면
-True로는 반영한다(양성 신호는 신뢰하되 음성 신호는 신뢰하지 않는 비대칭적 처리, "모르겠으면
-안 사면 된다" 원칙과 일치). 그래서 이 세 항목은 대부분 계속 사용자가 직접 확인해야 한다.
+내부 데이터 API는 직접 호출하지 않는다. 보험 상세는 Encar 로그인 세션이 필요한
+별도 화면이므로 새 브라우저 세션에서 로그인 화면으로 이동하면 그 사실을 명시한다.
 """
 from __future__ import annotations
 
 import logging
 import re
+from datetime import date
+from pathlib import Path
 from typing import Optional
 
 from bs4 import BeautifulSoup
@@ -41,13 +16,15 @@ from bs4 import BeautifulSoup
 from crawler.browser_fetch import BrowserFetcher
 from normalizer.schema import (
     Dealer,
-    DamageClaim,
+    HistoryEvent,
+    InfoUnavailablePeriod,
     InsuranceHistory,
     Listing,
     ListingText,
-    OtherPartyDamageClaim,
+    OwnerChangeLogEntry,
     PerformanceRecord,
     Photos,
+    ThirdPartyInspection,
     Vehicle,
     VerificationLink,
 )
@@ -57,6 +34,9 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://fem.encar.com"
 PHOTO_CDN = "https://ci.encar.com/carpicture"
 CARHISTORY_URL = "https://www.carhistory.or.kr/main.car"
+HISTORY_DETAIL_URL = "https://car.encar.com/history?carId={listing_id}"
+PERFORMANCE_DETAIL_URL = "https://www.encar.com/md/sl/mdsl_regcar.do?method=inspectionViewNew&carid={listing_id}"
+AUTH_STATE_PATH = Path(__file__).resolve().parents[2] / "data" / "encar_auth_state.json"
 
 _FUEL_MAP = {
     "가솔린": "gasoline",
@@ -83,7 +63,7 @@ class EncarDetailAdapter:
     source = "encar"
 
     def __init__(self, fetcher: Optional[BrowserFetcher] = None, timeout_sec: float = 25.0):
-        self.fetcher = fetcher or BrowserFetcher()
+        self.fetcher = fetcher or BrowserFetcher(storage_state=AUTH_STATE_PATH)
         self.timeout_sec = timeout_sec
 
     def parse_detail(self, url: str) -> Listing:
@@ -95,9 +75,16 @@ class EncarDetailAdapter:
         page = self.fetcher.new_page()
         try:
             page.goto(url, timeout=self.timeout_sec * 1000, wait_until="domcontentloaded")
-            page.wait_for_timeout(4000)
+            try:
+                page.wait_for_selector('[data-impression="차량이력"] li', timeout=8000)
+            except Exception:
+                pass
             state = page.evaluate("() => window.__PRELOADED_STATE__ ? window.__PRELOADED_STATE__.cars.base : null")
             html = page.content()
+            soup = BeautifulSoup(html, "html.parser")
+            insurance_history = self._parse_insurance_history(soup)
+            self._enrich_insurance_from_detail(page, insurance_history)
+            performance_record = self._read_performance_record(page, listing_id)
         except Exception as exc:
             raise RuntimeError(f"상세페이지를 가져오지 못했습니다: {url} ({exc})") from None
         finally:
@@ -108,11 +95,8 @@ class EncarDetailAdapter:
                 f"매물 데이터를 확인할 수 없습니다(판매완료/삭제되었거나 페이지 구조가 바뀌었을 수 있음): {url}"
             )
 
-        soup = BeautifulSoup(html, "html.parser")
-
         vehicle = self._build_vehicle(state)
         dealer = self._build_dealer(state, soup)
-        insurance_history = self._parse_insurance_history(soup)
         listing_text = self._build_listing_text(state, soup)
         photos = self._build_photos(state)
         verification_links = self._build_verification_links(state, url)
@@ -123,7 +107,7 @@ class EncarDetailAdapter:
             url=url,
             vehicle=vehicle,
             insurance_history=insurance_history,
-            performance_record=PerformanceRecord(),  # 부위별 프레임 데이터는 이 소스에서 확보 불가
+            performance_record=performance_record,
             dealer=dealer,
             listing_text=listing_text,
             photos=photos,
@@ -179,8 +163,7 @@ class EncarDetailAdapter:
 
     def _parse_insurance_history(self, soup: BeautifulSoup) -> InsuranceHistory:
         section = soup.select_one('[data-impression="차량이력"]')
-        own_claims: list[DamageClaim] = []
-        other_claims: list[OtherPartyDamageClaim] = []
+        own_amount = own_count = other_amount = other_count = None
         special_note = ""
         if section:
             for li in section.select("li"):
@@ -189,13 +172,9 @@ class EncarDetailAdapter:
                 value_tag = li.select_one("em")
                 value = value_tag.get_text(strip=True) if value_tag else li.get_text(strip=True).replace(label, "", 1)
                 if label == "내차 피해":
-                    amount, count = self._parse_claim_summary(value)
-                    if count:
-                        own_claims = self._split_claim(amount, count, own=True)
+                    own_amount, own_count = self._parse_claim_summary(value)
                 elif label == "타차 가해":
-                    amount, count = self._parse_claim_summary(value)
-                    if count:
-                        other_claims = self._split_claim(amount, count, own=False)
+                    other_amount, other_count = self._parse_claim_summary(value)
                 elif label == "특이 사항":
                     special_note = value
 
@@ -204,28 +183,260 @@ class EncarDetailAdapter:
         theft = True if "도난" in special_note else None
 
         return InsuranceHistory(
-            own_damage_claims=own_claims,
-            other_party_damage_claims=other_claims,
-            history_disclosed=True if section else None,
+            owner_change_count=None,
+            own_damage_count=own_count,
+            own_damage_total_krw=own_amount,
+            other_party_damage_count=other_count,
+            other_party_damage_total_krw=other_amount,
+            history_disclosed=None,  # 요약 노출만으로 상세 이력·공백까지 공개됐다고 볼 수 없음
             flood_damage=flood_damage,
             total_loss=total_loss,
             theft=theft,
         )
 
-    def _parse_claim_summary(self, text: str) -> tuple[int, int]:
+    def _parse_claim_summary(self, text: str) -> tuple[Optional[int], Optional[int]]:
+        if text.strip() == "없음":
+            return (0, 0)
         m = re.search(r"([\d,]+)\s*원\s*\(\s*(\d+)\s*회\s*\)", text)
         if not m:
-            return (0, 0)
+            return (None, None)
         return (int(m.group(1).replace(",", "")), int(m.group(2)))
 
-    def _split_claim(self, total_amount: int, count: int, own: bool):
-        if count <= 0:
-            return []
-        per_claim = round(total_amount / count)
-        amounts = [per_claim] * (count - 1) + [total_amount - per_claim * (count - 1)]
-        if own:
-            return [DamageClaim(date=None, amount_krw=a) for a in amounts]
-        return [OtherPartyDamageClaim(date=None, amount_krw=a) for a in amounts]
+    @staticmethod
+    def _normalize_history_date(raw: str) -> str:
+        match = re.search(r"(\d{2,4})년\s*(\d{1,2})월(?:\s*(\d{1,2})일)?", raw)
+        if not match:
+            return raw.strip()
+        year = int(match.group(1))
+        if year < 100:
+            year += 2000 if year <= date.today().year % 100 else 1900
+        month = int(match.group(2))
+        day = match.group(3)
+        return f"{year:04d}-{month:02d}" + (f"-{int(day):02d}" if day else "")
+
+    def _enrich_insurance_from_detail(self, page, history: InsuranceHistory) -> None:
+        button = page.locator('button[data-enlog-dt-hit="detail_car_history"]')
+        if not button.count():
+            return
+        popup = None
+        try:
+            with page.expect_popup(timeout=6000) as popup_info:
+                button.click(timeout=6000)
+            popup = popup_info.value
+            popup.wait_for_load_state("domcontentloaded", timeout=10000)
+            popup.wait_for_function(
+                "() => location.pathname.includes('/login') || !!document.body?.innerText?.includes('항목순')",
+                timeout=10000,
+            )
+            if "/login" in popup.url:
+                history.history_detail_status = "login_required"
+                return
+            popup.get_by_role("button", name="항목순").wait_for(timeout=10000)
+            popup.wait_for_function(
+                r"""() => {
+                    const match = (document.body?.innerText || '').match(/이력\s*총\s*(\d+)건/);
+                    if (!match) return false;
+                    return Number(match[1]) === document.querySelectorAll(
+                        '[class*="OrderedByTimeHistory_timeline"] button[data-enlog-dt-eventname]'
+                    ).length;
+                }""",
+                timeout=10000,
+            )
+            self._parse_history_timeline(popup, history)
+            popup.get_by_role("button", name="항목순").click()
+            popup.wait_for_selector('[class*="OrderedByItem_caution_list"] > li', timeout=10000)
+            self._parse_history_warnings(BeautifulSoup(popup.content(), "html.parser"), history)
+            history.history_disclosed = True
+            history.history_detail_status = "available"
+        except Exception as exc:
+            logger.info("Encar 보험 상세 화면을 읽지 못함: %s", exc)
+        finally:
+            if popup:
+                popup.close()
+
+    def _parse_history_timeline(self, popup, history: InsuranceHistory) -> None:
+        events = self._parse_history_events(BeautifulSoup(popup.content(), "html.parser"))
+        cards = popup.locator('[class*="OrderedByTimeHistory_timeline"] button[data-enlog-dt-eventname]')
+        for index, event in enumerate(events):
+            card = cards.nth(index)
+            drawer = popup.locator('[class*="Drawer-module_drawer"]')
+            try:
+                card.click(timeout=4000)
+                drawer.wait_for(state="visible", timeout=3000)
+                details = self._parse_history_drawer_details(
+                    BeautifulSoup(drawer.inner_html(timeout=2000), "html.parser")
+                )
+                event.details = details
+                exact_date = details.get("변경일자") or details.get("발생일자") or details.get("사고일자")
+                if exact_date:
+                    event.date = self._normalize_history_date(exact_date)
+            except Exception as exc:
+                logger.info("Encar 이력 사건 세부정보 미확인(%s): %s", event.category, exc)
+            finally:
+                if drawer.is_visible():
+                    try:
+                        drawer.locator('button[class*="DetailContentsLayer_close_btn"]').click(
+                            force=True, timeout=1500,
+                        )
+                    except Exception as exc:
+                        logger.info("Encar 이력 상세 창 닫기 재시도: %s", exc)
+                        if drawer.is_visible():
+                            popup.keyboard.press("Escape")
+                    try:
+                        drawer.wait_for(state="hidden", timeout=2000)
+                    except Exception as exc:
+                        logger.info("Encar 이력 상세 창이 남아 있어 후속 사건을 읽지 못함: %s", exc)
+                        break
+
+        self._apply_history_events(history, events)
+
+    def _apply_history_events(self, history: InsuranceHistory, events: list[HistoryEvent]) -> None:
+        history.history_events = events
+        owners = [event for event in events if "소유자변경" in event.category or "소유주변경" in event.category]
+        numbers = [event for event in events if re.search(
+            r"번호\s*변경|변경\s*번호", " ".join((event.category, event.details.get("변경구분", "")))
+        )]
+        uses = [event for event in events if re.search(
+            r"용도\s*변경|변경\s*용도", " ".join((event.category, event.details.get("변경구분", "")))
+        )]
+        history.owner_change_count = len(owners)
+        history.owner_change_log = [OwnerChangeLogEntry(date=event.date, note=event.summary) for event in owners]
+        history.number_change_count = len(numbers)
+        history.usage_change_count = len(uses)
+
+        for event in events:
+            if "침수" in event.category:
+                history.flood_damage = True
+            if "전손" in event.category:
+                history.total_loss = True
+            if "도난" in event.category:
+                history.theft = True
+            if "택시" in event.category:
+                history.usage_history.taxi_used = True
+            if "렌트" in event.category or "대여" in event.category:
+                history.usage_history.rental_used = True
+
+    def _parse_history_events(self, soup: BeautifulSoup) -> list[HistoryEvent]:
+        events = []
+        for block in soup.select('[class*="OrderedByTimeHistory_timeline"]'):
+            date_tag = block.select_one('[class*="OrderedByTimeHistory_date"]')
+            date_value = self._normalize_history_date(date_tag.get_text(strip=True)) if date_tag else ""
+            for button in block.select('button[data-enlog-dt-eventname]'):
+                summary_tag = button.select_one('[class*="OrderedByTimeHistory_detail_txt"]')
+                title_tag = button.select_one('[class*="OrderedByTimeHistory_tit"]')
+                events.append(HistoryEvent(
+                    category=title_tag.get_text(' ', strip=True) if title_tag else button.get('data-enlog-dt-eventname', ''),
+                    date=date_value,
+                    summary=summary_tag.get_text(" ", strip=True) if summary_tag else "",
+                ))
+        return events
+
+    def _parse_history_drawer_details(self, soup: BeautifulSoup) -> dict[str, str]:
+        details = {}
+        for item in soup.select('ul[class*="DetailContentsLayer_info_list"] > li'):
+            key_tag = item.select_one('span[class*="DetailContentsLayer_title"]')
+            if not key_tag:
+                continue
+            key = key_tag.get_text(" ", strip=True)
+            value_tag = item.select_one('em[class*="DetailContentsLayer_info_val"]')
+            value = (value_tag.get_text(" ", strip=True) if value_tag
+                     else item.get_text(" ", strip=True).replace(key, "", 1).strip())
+            if key:
+                details[key] = value
+        return details
+
+    def _parse_history_warnings(self, soup: BeautifulSoup, history: InsuranceHistory) -> None:
+        warnings = {}
+        for item in soup.select('[class*="OrderedByItem_caution_list"] > li'):
+            label = item.select_one('[class*="OrderedByItem_txt"]')
+            value = item.select_one('[class*="OrderedByItem_count"]')
+            if label and value:
+                warnings[label.get_text(" ", strip=True)] = value.get_text(" ", strip=True)
+        history.history_warnings = warnings
+
+        special = warnings.get("전손, 침수, 도난")
+        if special == "없음":
+            history.total_loss = history.flood_damage = history.theft = False
+        if warnings.get("택시 등 영업용") not in (None, "없음"):
+            history.usage_history.business_used = True
+        if warnings.get("렌터카 등 대여용") not in (None, "없음"):
+            history.usage_history.rental_used = True
+        gap = warnings.get("자차 보험 미가입 기간")
+        if gap is not None:
+            history.coverage_verified = True
+            if gap != "없음":
+                history.info_unavailable_periods = [InfoUnavailablePeriod()]
+
+    def _read_performance_record(self, page, listing_id: str) -> PerformanceRecord:
+        record = PerformanceRecord()
+        button = page.get_by_role("button", name="성능기록부 자세히보기")
+        if not button.count():
+            return record
+        record.record_url = PERFORMANCE_DETAIL_URL.format(listing_id=listing_id)
+        popup = None
+        try:
+            with page.expect_popup(timeout=6000) as popup_info:
+                button.click(timeout=6000)
+            popup = popup_info.value
+            popup.wait_for_function(
+                "() => /성능번호\\s*제\\s*\\d+/.test(document.body?.innerText || '')",
+                timeout=10000,
+            )
+            # 점검번호가 보인 뒤에도 외판/골격 도면 항목이 약간 늦게 채워진다.
+            popup.wait_for_timeout(700)
+            record = self._parse_performance_record(BeautifulSoup(popup.content(), "html.parser"))
+            record.record_url = popup.url
+        except Exception as exc:
+            logger.info("Encar 성능기록부 화면을 읽지 못함: %s", exc)
+        finally:
+            if popup:
+                popup.close()
+        return record
+
+    def _parse_performance_record(self, soup: BeautifulSoup) -> PerformanceRecord:
+        record = PerformanceRecord()
+        sections = {tag.get_text(strip=True): tag.parent for tag in soup.select('strong.tit_canv')}
+        frame = sections.get("주요골격")
+        panel = sections.get("외판")
+        if not frame or not panel:
+            return record
+        record.record_available = True
+
+        for item in panel.select('ul.list_state > li'):
+            if 'uiLankNone' in item.get('class', []):
+                continue
+            part = item.select_one('strong.tit_part')
+            state = item.select_one('div.txt_state')
+            description = f"{part.get_text(' ', strip=True) if part else item.get_text(' ', strip=True)} · {state.get_text(' ', strip=True) if state else '상태 미확인'}"
+            if state and "교환" in state.get_text():
+                record.panel_exchange.append(description)
+            else:
+                record.panel_repairs.append(description)
+
+        frame_lists = [frame.select_one(f'ul.uiListLank{rank}') for rank in "ABC"]
+        if all(frame_lists):
+            for rank, items in zip("ABC", frame_lists):
+                for item in items.select('li'):
+                    if 'uiLankNone' in item.get('class', []):
+                        continue
+                    part = item.select_one('strong.tit_part')
+                    state = item.select_one('div.txt_state')
+                    part_name = part.get_text(' ', strip=True) if part else item.get_text(' ', strip=True)
+                    state_name = state.get_text(' ', strip=True) if state else '상태 미확인'
+                    record.frame_damage.append(f"{rank}랭크 {part_name} · {state_name}")
+            record.third_party_inspection = ThirdPartyInspection(frame_ok=not record.frame_damage)
+
+        for row in soup.select('tr'):
+            selected = row.select('span.txt_state.on')
+            labels = [th.get_text(' ', strip=True) for th in row.select('th')]
+            if not selected or not labels:
+                continue
+            key = ' · '.join(labels)
+            value = ', '.join(tag.get_text(' ', strip=True) for tag in selected)
+            record.inspection_results[key] = value
+            if ("누유" in value or "누수" in value) and "없음" not in value:
+                record.leak_records.append(f"{key}: {value}")
+        return record
 
     def _build_listing_text(self, state: dict, soup: BeautifulSoup) -> ListingText:
         one_line = state.get("advertisement", {}).get("oneLineText", "") or ""
@@ -251,12 +462,18 @@ class EncarDetailAdapter:
         return Photos(urls=urls[:5])
 
     def _build_verification_links(self, state: dict, detail_url: str) -> list[VerificationLink]:
+        listing_id = re.search(r"/cars/detail/(\d+)", detail_url).group(1)
         links = [
             VerificationLink(label="매물 상세페이지(엔카)", url=detail_url, note="사진·판매자 설명 등 원본 그대로 확인"),
             VerificationLink(
-                label="성능·상태 점검기록부 / 차량이력 자세히 보기",
-                url=detail_url,
-                note='상세페이지의 "성능기록부 자세히보기"/"차량이력 자세히 보기" 버튼을 직접 눌러 확인(팝업이라 직링크 불가)',
+                label="성능·상태 점검기록부 원본",
+                url=PERFORMANCE_DETAIL_URL.format(listing_id=listing_id),
+                note="Encar에 등록된 점검기록부 원본",
+            ),
+            VerificationLink(
+                label="보험·소유자·번호·용도 변경 상세 이력",
+                url=HISTORY_DETAIL_URL.format(listing_id=listing_id),
+                note="Encar 로그인 후 이력 화면의 시간순·항목순을 확인",
             ),
         ]
         plate = state.get("vehicleNo")

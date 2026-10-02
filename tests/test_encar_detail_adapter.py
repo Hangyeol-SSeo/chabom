@@ -7,6 +7,7 @@ from __future__ import annotations
 from bs4 import BeautifulSoup
 
 from crawler.adapters.encar_detail_adapter import CARHISTORY_URL, EncarDetailAdapter
+from normalizer.schema import HistoryEvent
 
 STATE = {
     "category": {
@@ -83,13 +84,16 @@ def test_build_dealer_fields():
     assert "테스트상사" in dealer.display_name
 
 
-def test_parse_insurance_history_splits_own_damage_claims():
+def test_parse_insurance_summary_keeps_aggregate_without_inventing_claims():
     adapter = EncarDetailAdapter.__new__(EncarDetailAdapter)
     ih = adapter._parse_insurance_history(_soup())
-    assert len(ih.own_damage_claims) == 3
-    assert sum(c.amount_krw for c in ih.own_damage_claims) == 1_000_001
+    assert ih.own_damage_claims == []
+    assert ih.own_damage_count == 3
+    assert ih.own_damage_total_krw == 1_000_001
     assert ih.other_party_damage_claims == []
-    assert ih.history_disclosed is True
+    assert ih.other_party_damage_count == 0
+    assert ih.history_disclosed is None
+    assert ih.owner_change_count is None
 
 
 def test_special_note_none_does_not_confirm_clean():
@@ -136,3 +140,80 @@ def test_parse_detail_url_requires_cars_detail_pattern():
         assert False, "should have raised for wrong URL pattern"
     except RuntimeError as exc:
         assert "cars/detail" in str(exc)
+
+
+def test_parse_history_events_keeps_number_and_usage_changes():
+    html = """
+    <div class="OrderedByTimeHistory_timeline__a"><span class="OrderedByTimeHistory_date__b">21년 03월</span>
+      <button data-enlog-dt-eventname="소유자변경"><span class="OrderedByTimeHistory_detail_txt__c">당사자 거래이전</span></button></div>
+    <div class="OrderedByTimeHistory_timeline__a"><span class="OrderedByTimeHistory_date__b">22년 07월</span>
+      <button data-enlog-dt-eventname="차량번호변경"><span class="OrderedByTimeHistory_detail_txt__c">번호 변경</span></button>
+      <button data-enlog-dt-eventname="용도변경"><span class="OrderedByTimeHistory_detail_txt__c">대여용으로 변경</span></button></div>
+    """
+    adapter = EncarDetailAdapter.__new__(EncarDetailAdapter)
+    events = adapter._parse_history_events(BeautifulSoup(html, "html.parser"))
+    assert [(e.category, e.date) for e in events] == [
+        ("소유자변경", "2021-03"), ("차량번호변경", "2022-07"), ("용도변경", "2022-07")
+    ]
+    assert adapter._normalize_history_date("2021년 03월 14일") == "2021-03-14"
+
+
+def test_change_counts_use_exact_event_type_and_date():
+    adapter = EncarDetailAdapter.__new__(EncarDetailAdapter)
+    history = adapter._parse_insurance_history(_soup())
+    adapter._apply_history_events(history, [
+        HistoryEvent(category="소유자변경", date="2021-03-14", summary="당사자 거래이전"),
+        HistoryEvent(category="변경등록", date="2022-07", details={"변경구분": "번호변경"}),
+        HistoryEvent(category="변경등록", date="2023-01", details={"변경구분": "주소변경"}),
+        HistoryEvent(category="용도변경", date="2024-02-03"),
+    ])
+    assert history.owner_change_count == 1
+    assert history.owner_change_log[0].date == "2021-03-14"
+    assert history.number_change_count == 1
+    assert history.usage_change_count == 1
+
+
+def test_parse_history_warnings_distinguishes_gap_from_no_gap():
+    html = """<ul class="OrderedByItem_caution_list__a">
+      <li><p class="OrderedByItem_txt__a">전손, 침수, 도난</p><p class="OrderedByItem_count__a">없음</p></li>
+      <li><p class="OrderedByItem_txt__a">렌터카 등 대여용</p><p class="OrderedByItem_count__a">1건</p></li>
+      <li><p class="OrderedByItem_txt__a">자차 보험 미가입 기간</p><p class="OrderedByItem_count__a">1건</p></li>
+    </ul>"""
+    adapter = EncarDetailAdapter.__new__(EncarDetailAdapter)
+    ih = adapter._parse_insurance_history(_soup())
+    adapter._parse_history_warnings(BeautifulSoup(html, "html.parser"), ih)
+    assert ih.coverage_verified is True
+    assert len(ih.info_unavailable_periods) == 1
+    assert ih.usage_history.rental_used is True
+    assert ih.flood_damage is False and ih.total_loss is False and ih.theft is False
+
+
+def test_history_drawer_allows_values_without_em_tag():
+    html = """<ul class="DetailContentsLayer_info_list__a">
+      <li><span class="DetailContentsLayer_title__a">변경일자</span><em class="DetailContentsLayer_info_val__a">2021년 03월 14일</em></li>
+      <li><span class="DetailContentsLayer_title__a">검사결과</span><span>적합</span></li>
+    </ul>"""
+    adapter = EncarDetailAdapter.__new__(EncarDetailAdapter)
+    assert adapter._parse_history_drawer_details(BeautifulSoup(html, "html.parser")) == {
+        "변경일자": "2021년 03월 14일", "검사결과": "적합",
+    }
+
+
+def test_parse_performance_record_separates_panel_frame_and_selected_results():
+    html = """<ul>
+      <li><strong class="tit_canv">외판</strong><ul class="list_state uiListLank1">
+        <li><strong class="tit_part">프론트 휀더(우)</strong><div class="txt_state"><span>교환</span></div></li>
+      </ul></li>
+      <li><strong class="tit_canv">주요골격</strong>
+        <ul class="list_state uiListLankA"><li class="uiLankNone">없음</li></ul>
+        <ul class="list_state uiListLankB"><li><strong class="tit_part">사이드 멤버</strong><div class="txt_state">판금</div></li></ul>
+        <ul class="list_state uiListLankC"><li class="uiLankNone">없음</li></ul>
+      </li>
+    </ul><table><tr><th>실린더 커버</th><td><span class="txt_state">없음</span><span class="txt_state on">미세누유</span></td></tr></table>"""
+    adapter = EncarDetailAdapter.__new__(EncarDetailAdapter)
+    record = adapter._parse_performance_record(BeautifulSoup(html, "html.parser"))
+    assert record.record_available is True
+    assert record.panel_exchange == ["프론트 휀더(우) · 교환"]
+    assert record.frame_damage == ["B랭크 사이드 멤버 · 판금"]
+    assert record.third_party_inspection.frame_ok is False
+    assert record.leak_records == ["실린더 커버: 미세누유"]
