@@ -32,7 +32,7 @@ with tempfile.TemporaryDirectory() as directory:
     sample={'source':'encar','listing_id':'123','url':'https://example.com/car','vehicle':{'make':'기아','model':'더 뉴 모닝','model_year':2021,'mileage_km':32000,'price_krw':8900000,'region':'서울'},'dealer':{'dealer_id':'dealer-1','display_name':'테스트판매자A','phone':'01000000000','region':'서울 강남'},'insurance_history':{'own_damage_claims':[{'amount_krw':5000000}],'owner_change_count':1,'number_change_count':1,'usage_change_count':1,'history_detail_status':'available','coverage_verified':True,'history_warnings':{'자차 보험 미가입 기간':'없음'},'history_events':[{'category':'소유자변경','date':'2021-03-14','summary':'당사자 거래이전','details':{'변경일자':'2021년 03월 14일'}},{'category':'차량번호변경','date':'2022-07-01','summary':'번호 변경','details':{}}]},'performance_record':{'record_available':True,'record_url':'https://example.com/record/123','panel_exchange':['프론트 휀더(우) · 교환'],'third_party_inspection':{'frame_ok':True}}}
     with closing(history.get_connection(server.HISTORY_DB_PATH)) as conn:
         history.record(conn,sample['url'],source='encar',listing=sample)
-        history.record(conn,'https://example.com/car2',source='kcar',listing={'source':'kcar','listing_id':'456','url':'https://example.com/car2','vehicle':{'make':'현대','model':'캐스퍼','model_year':2023,'price_krw':15000000},'dealer':{'dealer_id':'dealer-2','display_name':'테스트판매자B'},'insurance_history':{'history_detail_status':'available','coverage_verified':True,'owner_change_count':2,'number_change_count':0,'history_events':[{'category':'소유자 변경','date':'2022-05-06','summary':'합성 거래','details':{}}]},'performance_record':{'record_available':True,'record_images':['https://images.example.com/test-record.jpg'],'panel_exchange_count':2,'panel_exchange':['외판 교환 2건(케이카 진단)'],'third_party_inspection':{'frame_ok':True}}})
+        history.record(conn,'https://example.com/car2',source='kcar',listing={'source':'kcar','listing_id':'456','url':'https://example.com/car2','vehicle':{'make':'현대','model':'캐스퍼','model_year':2023,'price_krw':15000000},'dealer':{'dealer_id':'dealer-2','display_name':'테스트판매자B'},'insurance_history':{'history_detail_status':'available','coverage_verified':True,'info_unavailable_periods':[{'start':'2020-01-01','end':'2020-03-31'}],'owner_change_count':2,'number_change_count':0,'history_events':[{'category':'소유자 변경','date':'2022-05-06','summary':'합성 거래','details':{}}]},'performance_record':{'record_available':True,'record_images':['https://images.example.com/test-record.jpg'],'panel_exchange_count':2,'panel_exchange':['외판 교환 2건(케이카 진단)'],'third_party_inspection':{'frame_ok':True}}})
         history.record(conn,'https://example.com/failed',status='failed',reason='조회 실패')
     server_errors=ServerErrors();logging.getLogger('uvicorn.error').addHandler(server_errors)
     service=uvicorn.Server(uvicorn.Config(server.app,host='127.0.0.1',port=8765,log_level='error'))
@@ -79,6 +79,8 @@ with tempfile.TemporaryDirectory() as directory:
             page.get_by_role('link',name='매물 확인',exact=True).click()
             expect(page.get_by_role('heading',name='엔카 사이트 연결')).to_be_visible()
             expect(page.get_by_role('heading',name='케이카 사이트 연결')).to_be_visible()
+            expect(page.get_by_role('heading',name='조회 후 확인할 근거')).to_be_visible()
+            expect(page.locator('.steps')).to_have_count(0)
             page.get_by_role('link',name='차량 보관함',exact=False).last.click()
             page.get_by_role('button',name='기아 더 뉴 모닝 찜하기',exact=True).click()
             page.get_by_role('button',name='찜한 매물1',exact=True).click()
@@ -90,6 +92,8 @@ with tempfile.TemporaryDirectory() as directory:
             expect(page.locator('.car-title').first).to_have_text('현대 캐스퍼')
             page.get_by_role('button',name='현대 캐스퍼',exact=True).click()
             expect(page.get_by_role('heading',name='보험·차량 상세 이력')).to_be_visible()
+            expect(page.locator('.coverage-status.gap')).to_contain_text('추적 공백 있음')
+            expect(page.locator('.coverage-status.gap')).to_contain_text('2020-01-01 ~ 2020-03-31')
             expect(page.get_by_text('2022-05-06')).to_be_visible()
             expect(page.get_by_text('원본 1쪽 열기')).to_be_visible()
             expect(page.locator('.evidence-metrics').filter(has_text='외판 교환')).to_contain_text('2건')
@@ -97,6 +101,7 @@ with tempfile.TemporaryDirectory() as directory:
             page.screenshot(path='/tmp/chabom-garage-desktop.png',full_page=True)
             page.get_by_role('button',name='기아 더 뉴 모닝',exact=True).click()
             expect(page.get_by_role('heading',name='보험·차량 상세 이력')).to_be_visible()
+            expect(page.locator('.coverage-status.clear')).to_contain_text('공백 없음')
             expect(page.get_by_text('2021-03-14')).to_be_visible()
             expect(page.locator('.evidence-list').get_by_text('프론트 휀더(우) · 교환')).to_be_visible()
             # 검증 버튼을 누르기 전에도 저장된 정보 기준 판정이 펼쳐져 있다.

@@ -185,6 +185,7 @@ def test_info_gap_fails_even_when_disclosed():
     result = evaluate_checklist(listing, weights=WEIGHTS)
     assert result.overall == "hold"
     assert item(result, "insurance_history").verdict == "fail"
+    assert "추적 공백" in item(result, "insurance_history").detail
 
 
 def test_theft_history_fails():

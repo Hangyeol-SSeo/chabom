@@ -126,11 +126,11 @@ def _insurance_history_item(listing: Listing) -> ChecklistItem:
         total_days = sum(
             (p.end and p.start and _days_between(p.start, p.end)) or 0 for p in ih.info_unavailable_periods
         )
-        gap_length = f"약 {total_days}일" if total_days else "기간 미확인"
+        gap_length = f"약 {total_days}일" if total_days else "날짜 미제공"
         return ChecklistItem(
             "insurance_history", "보험이력 조회", "fail",
-            f"이력 조회는 가능하나 정보 공백 기간이 있습니다({gap_length}) — 자차보험 미가입 기간 동안의 "
-            "사고 이력이 누락됐을 수 있습니다",
+            f"자차보험 미가입으로 내차 피해 보험이력의 추적 공백이 확인됐습니다({gap_length}) — "
+            "해당 기간의 사고가 보험 처리 이력에 남지 않았을 수 있습니다",
             critical=True,
         )
     if not ih.coverage_verified and listing.source in {"encar", "kcar"}:
