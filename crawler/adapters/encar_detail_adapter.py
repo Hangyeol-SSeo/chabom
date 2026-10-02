@@ -363,9 +363,15 @@ class EncarDetailAdapter:
             history.usage_history.rental_used = True
         gap = warnings.get("자차 보험 미가입 기간")
         if gap is not None:
-            history.coverage_verified = True
-            if gap != "없음":
-                history.info_unavailable_periods = [InfoUnavailablePeriod()]
+            value = re.sub(r"\s+", "", gap)
+            if value in {"없음", "0건", "0회"}:
+                history.coverage_verified = True
+                history.info_unavailable_periods = []
+            elif value in {"있음", "유", "있습니다"} or re.fullmatch(r"[1-9]\d*(?:건|회)", value):
+                # 엔카 항목순 화면은 존재 여부만 표시하고 시작·종료일은 제공하지 않는다.
+                history.coverage_verified = True
+                count = min(int(re.match(r"\d+", value).group()), 20) if value[0].isdigit() else 1
+                history.info_unavailable_periods = [InfoUnavailablePeriod() for _ in range(count)]
 
     def _read_performance_record(self, page, listing_id: str) -> PerformanceRecord:
         record = PerformanceRecord()

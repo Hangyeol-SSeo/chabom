@@ -138,6 +138,25 @@ def test_insurance_dialog_without_gap_evidence_does_not_mark_coverage_verified()
     assert history.history_warnings["자차 보험 미가입 기간"] == "미확인"
 
 
+def test_insurance_dialog_distinguishes_no_gap_from_multiple_periods():
+    base = '''<div class="el-dialog__body"><h2>보험사고이력 상세 정보</h2>
+      <div class="hisBox"><ul><li><p>소유자 변경</p><strong>없음</strong></li>
+      <li><p>차량번호 변경</p><strong>없음</strong></li></ul></div>
+      <div class="boxDesc insuBox"><div class="insuTxt">{gap}</div></div></div>'''
+    adapter = KcarDetailAdapter.__new__(KcarDetailAdapter)
+    clear = InsuranceHistory(owner_change_count=None)
+    adapter._parse_insurance_dialog(BeautifulSoup(base.format(gap='<strong>없음</strong>'), "html.parser"), clear)
+    assert clear.coverage_verified is True
+    assert clear.info_unavailable_periods == []
+
+    present = InsuranceHistory(owner_change_count=None)
+    rows = '<strong>2020년 01월 ~ 2020년 03월</strong><strong>2021년 06월 ~ 2021년 07월</strong>'
+    adapter._parse_insurance_dialog(BeautifulSoup(base.format(gap=rows), "html.parser"), present)
+    assert present.coverage_verified is True
+    assert [(item.start, item.end) for item in present.info_unavailable_periods] == [
+        ("2020-01-01", "2020-03-31"), ("2021-06-01", "2021-07-31")]
+
+
 def test_find_message_content_picks_history_section_not_general_summary():
     adapter = KcarDetailAdapter.__new__(KcarDetailAdapter)
     text = adapter._find_message_content(_soup(), "과거이력")

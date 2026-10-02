@@ -311,20 +311,23 @@ class KcarDetailAdapter:
                     history.usage_history.business_used = True
 
         gap_box = soup.select_one(".boxDesc.insuBox")
-        gap = gap_box.select_one(".insuTxt strong") if gap_box else None
-        if gap:
+        gap_values = [tag.get_text(" ", strip=True) for tag in gap_box.select(".insuTxt strong")] if gap_box else []
+        gap_values = [value for value in gap_values if value]
+        positive_values = [value for value in gap_values if "~" in value or value in {"있음", "있습니다", "유"}
+                           or re.fullmatch(r"[1-9]\d*(?:건|회)", value)]
+        if positive_values:
             history.coverage_verified = True
-            raw = gap.get_text(" ", strip=True)
-            periods = raw.split("~", 1)
-            if len(periods) == 2:
-                history.info_unavailable_periods.append(InfoUnavailablePeriod(
-                    start=self._normalize_date(periods[0]),
-                    end=self._normalize_date(periods[1], end_of_month=True),
-                ))
-            else:
-                history.info_unavailable_periods.append(InfoUnavailablePeriod())
-            history.history_warnings["자차 보험 미가입 기간"] = raw
-        elif gap_box and re.search(r"없음|없습니다|해당 없음", gap_box.get_text(" ", strip=True)):
+            for raw in positive_values:
+                parts = raw.split("~", 1)
+                if len(parts) == 2:
+                    history.info_unavailable_periods.append(InfoUnavailablePeriod(
+                        start=self._normalize_date(parts[0]),
+                        end=self._normalize_date(parts[1], end_of_month=True),
+                    ))
+                else:
+                    history.info_unavailable_periods.append(InfoUnavailablePeriod())
+            history.history_warnings["자차 보험 미가입 기간"] = ", ".join(positive_values)
+        elif gap_box and re.search(r"없음|없습니다|해당 없음|0건|0회", gap_box.get_text(" ", strip=True)):
             history.coverage_verified = True
             history.history_warnings["자차 보험 미가입 기간"] = "없음"
         else:

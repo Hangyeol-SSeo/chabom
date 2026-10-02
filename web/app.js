@@ -152,7 +152,25 @@
       <button class="icon-button" data-action="favorite-car" data-id="${item.id}" aria-pressed="${item.favorite}" aria-label="${esc(titleOf(l))} ${item.favorite?'찜 해제':'찜하기'}">${icon('heart')}</button></article>`;
   }
   function renderLookup(){
-    $('main').innerHTML=heading('CHECK A CAR','매물 확인','마음에 드는 차량의 링크를 붙여넣어 주세요.')+`<div class="lookup-layout"><section class="panel lookup-panel"><h2>이 차, 조금 더 살펴볼까요?</h2><form id="lookupForm" class="lookup-form"><label class="field-label" for="lookupURL">매물 링크</label><div class="url-row"><input id="lookupURL" type="url" required placeholder="https://…" value="${esc(state.lookupURL)}"><button class="button primary" type="submit" ${state.lookupRunning?'disabled':''}>${state.lookupRunning?'불러오는 중…':'차량 불러오기'}${icon('arrow')}</button></div></form><div class="source-hints"><span>엔카</span><span>케이카</span><span>KB차차차</span><span>보배드림</span></div><div id="lookupMessage" class="inline-message${state.lookupError?' error':''}" role="status" ${!state.lookupMessage?'hidden':''}>${esc(state.lookupMessage)}</div><div class="manual-row"><span>링크가 없거나 불러오지 못하셨나요?</span><button class="button quiet small" data-action="manual">직접 입력${icon('arrow')}</button></div></section>${renderSiteConnections()}<div class="steps"><div><p class="number">01 / 불러오기</p><h3>차량 정보 확인</h3><p>가격과 기본 정보를<br>한곳에서 확인하세요.</p></div><div><p class="number">02 / 확인하기</p><h3>핵심 이력 체크</h3><p>기록부와 보험이력으로<br>빠진 항목을 채워보세요.</p></div><div><p class="number">03 / 보관하기</p><h3>마음에 들면 찜</h3><p>차량과 딜러를 저장해<br>다시 비교해보세요.</p></div></div></div>`;
+    $('main').innerHTML=heading('CHECK A CAR','매물 확인','사이트에서 찾은 매물 링크로 보험과 성능 근거를 확인하세요.')+`
+      <div class="lookup-layout">
+        <section class="panel lookup-panel">
+          <div class="lookup-panel-intro"><span class="lookup-eyebrow">매물 링크 조회</span><h2>확인할 차량의 링크를 붙여넣어 주세요</h2><p>엔카·케이카에서 로그인 후 복사한 링크는 아래 연결 세션을 사용합니다.</p></div>
+          <form id="lookupForm" class="lookup-form"><label class="field-label" for="lookupURL">매물 링크</label><div class="url-row"><input id="lookupURL" type="url" required placeholder="https://…" value="${esc(state.lookupURL)}"><button class="button primary" type="submit" ${state.lookupRunning?'disabled':''}>${state.lookupRunning?'불러오는 중…':'차량 불러오기'}${icon('arrow')}</button></div></form>
+          <div class="source-hints"><span>엔카</span><span>케이카</span><span>KB차차차</span><span>보배드림</span></div>
+          <div id="lookupMessage" class="inline-message${state.lookupError?' error':''}" role="status" ${!state.lookupMessage?'hidden':''}>${esc(state.lookupMessage)}</div>
+          <div class="manual-row"><span>링크가 없거나 불러오지 못하셨나요?</span><button class="button quiet small" data-action="manual">직접 입력${icon('arrow')}</button></div>
+        </section>
+        ${renderSiteConnections()}
+        <section class="lookup-evidence" aria-labelledby="lookupEvidenceTitle">
+          <div class="lookup-evidence-heading"><h2 id="lookupEvidenceTitle">조회 후 확인할 근거</h2><p>가져온 정보를 차량 상세에서 바로 살펴볼 수 있습니다.</p></div>
+          <div class="lookup-evidence-grid">
+            <div><span class="lookup-evidence-icon">${icon('shield')}</span><h3>보험 상세 이력</h3><p>소유자·번호 변경과 사고 내역, 자차보험 미가입으로 인한 추적 공백을 확인합니다.</p></div>
+            <div><span class="lookup-evidence-icon">${icon('car')}</span><h3>성능·상태 기록</h3><p>외판·주요골격 진단과 점검기록부 원본을 확인합니다.</p></div>
+          </div>
+          <p class="lookup-evidence-note">원본에서 확인되지 않은 항목은 미확인으로 표시하고 구매 판단을 보류합니다.</p>
+        </section>
+      </div>`;
   }
   async function lookup(url){
     if(state.lookupRunning)return;
@@ -179,16 +197,24 @@
   const checks=[['frame_ok','프레임 손상','무손상 확인','손상 있음',true],['flood_damage','침수 이력','없음 확인','있음',false],['total_loss','전손 이력','없음 확인','있음',false],['theft','도난 이력','없음 확인','있음',false],['history_disclosed','보험이력 조회','조회 가능','비공개 / 거부',true]];
   const countLabel = value => value == null ? '미확인' : `${value}건`;
   const amountLabel = (count,amount) => count == null ? '미확인' : count===0 ? '없음' : `${count}건 · ${amount == null ? '금액 미확인' : amount.toLocaleString('ko-KR')+'원'}`;
+  function renderCoverageGap(ih){
+    const periods=ih.info_unavailable_periods||[];
+    const state=periods.length?'gap':ih.coverage_verified?'clear':'unknown';
+    const title=state==='gap'?'자차보험 미가입 기간 확인':state==='clear'?'자차보험 미가입 기간 없음':'자차보험 미가입 기간 미확인';
+    const description=state==='gap'?'이 기간의 내차 피해는 보험 처리 이력으로 추적되지 않을 수 있습니다.':state==='clear'?'보험 상세 화면에서 미가입 기간이 없음을 확인했습니다.':'보험 상세 화면에서 미가입 여부를 확인해야 합니다.';
+    return `<div class="coverage-status ${state}"><div class="coverage-status-heading"><strong>${title}</strong><span class="pill ${state==='gap'?'red':state==='clear'?'green':'amber'}">${state==='gap'?'추적 공백 있음':state==='clear'?'공백 없음':'미확인'}</span></div><p>${description}</p>${periods.length?`<ul>${periods.map((period,index)=>`<li>${period.start||period.end?`${esc(period.start||'시작일 미확인')} ~ ${esc(period.end||'종료일 미확인')}`:`구간 ${index+1}: 날짜 미제공`}</li>`).join('')}</ul>`:''}</div>`;
+  }
   function renderHistoryDetails(l){
-    const ih=l.insurance_history||{},events=ih.history_events||[],warnings=Object.entries(ih.history_warnings||{});
+    const ih=l.insurance_history||{},events=ih.history_events||[],warnings=Object.entries(ih.history_warnings||{}).filter(([key])=>key!=='자차 보험 미가입 기간');
     const detailReady=ih.history_detail_status==='available';
     const name=sourceName(l.source),historyLink=(l.verification_links||[]).find(link=>link.label.includes('상세 이력'))?.url||l.url;
     const message=detailReady?`${name}의 상세 이력 화면에서 확인한 내용입니다.`:ih.history_detail_status==='login_required'?`차봄에 ${name} 로그인을 연결한 뒤 차량을 다시 불러오면 상세 이력을 확인할 수 있습니다.`:`상세 이력을 가져오지 못했습니다. ${name} 원문에서 소유자·번호·용도 변경과 미가입 기간을 확인해주세요.`;
     return `<section class="panel evidence-panel"><div class="panel-heading"><h2>보험·차량 상세 이력</h2>${safeURL(historyLink)?`<a class="row-link" href="${esc(safeURL(historyLink))}" target="_blank" rel="noopener noreferrer">${name} 원문${icon('arrow')}</a>`:''}</div>
       <p class="form-note">${esc(message)}</p>
+      ${renderCoverageGap(ih)}
       <div class="evidence-metrics"><div><span>소유자 변경</span><strong>${countLabel(ih.owner_change_count)}</strong></div><div><span>번호 변경</span><strong>${countLabel(ih.number_change_count)}</strong></div><div><span>용도 변경</span><strong>${countLabel(ih.usage_change_count)}</strong></div></div>
       <div class="evidence-metrics"><div><span>내차 피해</span><strong>${esc(amountLabel(ih.own_damage_count,ih.own_damage_total_krw))}</strong></div><div><span>타차 가해</span><strong>${esc(amountLabel(ih.other_party_damage_count,ih.other_party_damage_total_krw))}</strong></div></div>
-      ${warnings.length?`<div class="evidence-block"><h3>주의 이력과 정보 공백</h3><dl class="evidence-pairs">${warnings.map(([key,value])=>`<div><dt>${esc(key)}</dt><dd>${esc(value)}</dd></div>`).join('')}</dl></div>`:'<p class="evidence-empty">자차 보험 미가입·전손·침수·도난·영업용 여부는 상세 화면에서 확인이 필요합니다.</p>'}
+      ${warnings.length?`<div class="evidence-block"><h3>기타 주의 이력</h3><dl class="evidence-pairs">${warnings.map(([key,value])=>`<div><dt>${esc(key)}</dt><dd>${esc(value)}</dd></div>`).join('')}</dl></div>`:''}
       ${events.length?`<div class="evidence-block"><h3>변경 및 차량 이력 ${events.length}건</h3><ol class="history-events">${events.map(event=>`<li><time>${esc(event.date||'날짜 미확인')}</time><div><strong>${esc(event.category)}</strong>${event.summary?`<p>${esc(event.summary)}</p>`:''}${Object.keys(event.details||{}).length?`<dl>${Object.entries(event.details).map(([key,value])=>`<div><dt>${esc(key)}</dt><dd>${esc(value)}</dd></div>`).join('')}</dl>`:''}</div></li>`).join('')}</ol></div>`:''}
     </section>`;
   }

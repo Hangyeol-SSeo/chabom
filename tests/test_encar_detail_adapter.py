@@ -188,6 +188,23 @@ def test_parse_history_warnings_distinguishes_gap_from_no_gap():
     assert ih.flood_damage is False and ih.total_loss is False and ih.theft is False
 
 
+def test_parse_history_warnings_handles_explicit_presence_and_zero_count():
+    adapter = EncarDetailAdapter.__new__(EncarDetailAdapter)
+    for value, expected in (("있음", 1), ("2건", 2), ("없음", 0), ("0건", 0)):
+        html = f'''<ul class="OrderedByItem_caution_list__a"><li>
+          <p class="OrderedByItem_txt__a">자차 보험 미가입 기간</p>
+          <p class="OrderedByItem_count__a">{value}</p></li></ul>'''
+        history = adapter._parse_insurance_history(_soup())
+        adapter._parse_history_warnings(BeautifulSoup(html, "html.parser"), history)
+        assert history.coverage_verified is True
+        assert len(history.info_unavailable_periods) == expected
+        assert all(period.start is None and period.end is None for period in history.info_unavailable_periods)
+
+    history = adapter._parse_insurance_history(_soup())
+    adapter._parse_history_warnings(BeautifulSoup(html.replace("0건", "조회 불가"), "html.parser"), history)
+    assert history.coverage_verified is False
+
+
 def test_history_drawer_allows_values_without_em_tag():
     html = """<ul class="DetailContentsLayer_info_list__a">
       <li><span class="DetailContentsLayer_title__a">변경일자</span><em class="DetailContentsLayer_info_val__a">2021년 03월 14일</em></li>
