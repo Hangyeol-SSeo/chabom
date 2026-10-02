@@ -44,7 +44,6 @@ from crawler.adapters.encar_detail_adapter import AUTH_STATE_PATH, EncarDetailAd
 from crawler.encar_session import EncarSessionManager
 from crawler.adapters.kbchachacha_adapter import KbchachachaAdapter
 from crawler.adapters.kcar_detail_adapter import AUTH_STATE_PATH as KCAR_AUTH_STATE_PATH, KcarDetailAdapter
-from crawler.browser_fetch import BrowserFetcher
 from crawler.site_session import SiteSessionManager
 from normalizer.schema import Listing
 from scoring.checklist import ChecklistResult, DealerStatus, evaluate_checklist
@@ -63,7 +62,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_fetcher = BrowserFetcher()
 _encar_session = EncarSessionManager(AUTH_STATE_PATH)
 _kcar_session = SiteSessionManager(KCAR_AUTH_STATE_PATH, "https://www.kcar.com/")
 _weights = load_weights()
@@ -83,12 +81,15 @@ _SOURCE_HOSTS = {
     "encar.com": ("encar", True),
 }
 
+# 어댑터는 조회마다 새로 만들고, 각자 자기 브라우저 세션을 연다(_lookup에서 같은 스레드로 닫는다).
+# Playwright sync 세션은 만든 스레드에서만 쓰고 닫을 수 있고 한 스레드에 하나만 열 수 있어서,
+# 서버 전체가 세션 하나를 공유하면 요청 스레드가 바뀌거나 다른 사이트를 이어서 조회할 때 실패한다.
+# Encar·K Car는 저장된 탐색 세션 파일도 이렇게 조회마다 새 컨텍스트에 반영된다.
 _ADAPTERS = {
-    "bobaedream": lambda: BobaedreamAdapter(fetcher=_fetcher),
-    "kbchachacha": lambda: KbchachachaAdapter(fetcher=_fetcher),
-    "kcar": lambda: KcarDetailAdapter(),
-    # Encar 로그인 상태 파일은 조회마다 새 컨텍스트에 반영한다.
-    "encar": lambda: EncarDetailAdapter(),
+    "bobaedream": BobaedreamAdapter,
+    "kbchachacha": KbchachachaAdapter,
+    "kcar": KcarDetailAdapter,
+    "encar": EncarDetailAdapter,
 }
 
 
@@ -210,10 +211,30 @@ async def lookup(req: LookupRequest) -> dict:
     return result
 
 
+def _stored_check(dealer_conn, listing: Optional[dict]) -> Optional[dict]:
+    """저장된 매물을 그대로 판정한다 — 목록·상세에서 결격 사유를 누르지 않고 바로 보여주기 위함."""
+    if not listing:
+        return None
+    try:
+        parsed = Listing.from_dict({"listing_id": "manual", "source": "manual", **listing})
+        dealer_status = _build_dealer_status(dealer_conn, parsed, remember=False)
+        result = evaluate_checklist(parsed, dealer_status=dealer_status, weights=_weights)
+    except Exception as exc:  # noqa: BLE001 — 옛 형식의 저장본 하나 때문에 목록 전체가 막히면 안 된다
+        logger.info("저장된 매물 판정 실패: %s", type(exc).__name__)
+        return None
+    check = _result_to_dict(result, parsed)
+    del check["listing"], check["dealer_status"]
+    return check
+
+
 @app.get('/api/history')
 def get_history() -> dict:
     with closing(history_store.get_connection(HISTORY_DB_PATH)) as conn:
-        return {'items': history_store.list_history(conn)}
+        items = history_store.list_history(conn)
+    with closing(dealer_store.get_connection(DEALERS_DB_PATH)) as conn:
+        for item in items:
+            item['check'] = _stored_check(conn, item['listing'])
+    return {'items': items}
 
 
 class FavoriteRequest(BaseModel):
@@ -251,8 +272,10 @@ def _lookup(req: LookupRequest) -> dict:
         logger.warning("단건 조회 실패: %s (%s)", req.url, exc)
         return {"ok": False, "reason": f"조회에 실패했습니다: {exc}"}
     finally:
-        if source in {"encar", "kcar"}:
+        try:
             adapter.fetcher.close()
+        except Exception as exc:  # noqa: BLE001 — 세션 정리 실패가 조회 결과를 가리면 안 된다
+            logger.warning("브라우저 세션 정리 실패: %s", type(exc).__name__)
     return {"ok": True, "listing": listing.to_dict()}
 
 
@@ -368,18 +391,21 @@ def favorite_dealer(req: DealerFavoriteRequest) -> dict:
     return {'ok': True, 'favorite': req.favorite}
 
 
-def _build_dealer_status(conn, listing: Listing) -> DealerStatus:
+def _build_dealer_status(conn, listing: Listing, remember: bool = True) -> DealerStatus:
+    """`remember=False`면 딜러를 새로 등록·갱신하지 않고 읽기만 한다(목록 조회용)."""
     source, dealer_key = listing.source, listing.dealer.dealer_id
     if not dealer_key:
         return DealerStatus(known=False)
     phone = dealer_store.normalize_phone(listing.dealer.phone)
-    dealer_store.upsert_dealer(conn, source, dealer_key, display_name=listing.dealer.display_name,
-                              phone=listing.dealer.phone, region=listing.dealer.region)
+    if remember:
+        dealer_store.upsert_dealer(conn, source, dealer_key, display_name=listing.dealer.display_name,
+                                  phone=listing.dealer.phone, region=listing.dealer.region)
     record = dealer_store.get_dealer(conn, source, dealer_key)
     phone_matches = dealer_store.find_by_phone(conn, phone, exclude=(source, dealer_key)) if phone else []
     if record is None:
         # 처음 보는 딜러면 이번 조회를 계기로 등록해둔다(블랙리스트 아님 — 나중에 조회/등록용 인덱스).
-        dealer_store.upsert_dealer(conn, source, dealer_key, phone=listing.dealer.phone, region=listing.dealer.region)
+        if remember:
+            dealer_store.upsert_dealer(conn, source, dealer_key, phone=listing.dealer.phone, region=listing.dealer.region)
         return DealerStatus(source=source, dealer_key=dealer_key, known=True, phone_matches=phone_matches)
     return DealerStatus(
         source=source, dealer_key=dealer_key, known=True,
@@ -413,7 +439,6 @@ def _result_to_dict(result: ChecklistResult, listing: Listing) -> dict:
 
 @app.on_event("shutdown")
 async def _shutdown() -> None:
-    _fetcher.close()
     await _encar_session.close()
     await _kcar_session.close()
 

@@ -5,9 +5,12 @@ robots.txt 확인 결과(crawler/compliance.py): www.bobaedream.co.kr는 'User-a
 페이지 모두 정적 서버 렌더링 HTML로 확인되어 이 어댑터를 구현했다.
 
 **알려진 데이터 한계 (중요, README 참고)**
-- `performance_record`(외판교환/프레임손상/누유)는 이 어댑터가 확인한 표본 매물의 상세페이지에는
-  없었다(사이트는 "성능점검기록부는 직접 확인하라"는 안내만 제공). 즉 이 어댑터만으로는 스펙의
-  핵심 하드필터인 프레임손상 여부를 검증할 수 없다. `detect_data_gaps()`가 이 상태를 경고로 노출한다.
+- `performance_record`는 상세페이지 "성능점검" 섹션의 "상세보기" 팝업
+  (`/mycar/popup/mycarChart_5.php`)에서 읽는다(2026-10-02 추가 — 로그인 없이 열리는 정적 HTML).
+  외판 14부위·주요골격 24부위의 교환/판금·용접/부식과 주요장치 점검 결과를 확보한다. 단,
+  이 기록부는 **판매자가 직접 입력한 내용**이고, 성능점검 섹션이 아예 없는 매물(개인 매물 등)과
+  기록부를 스캔 이미지로만 올린 매물은 부위별 판독이 불가하다 — 이 경우 프레임 손상 여부는
+  계속 "미확인"으로 남고(이미지는 `record_images`로 화면에 그대로 보여준다) 사용자가 직접 확인한다.
 - `insurance_history.own_damage_claims`/`other_party_damage_claims`는 상세페이지에 건수+총액
   집계로만 노출된다(예: "보험사고(내차피해) 3회 (3,868,140원)"). 건별 날짜/금액이 없으므로
   총액을 건수로 균등 배분한 근사치를 사용한다 — 실제 개별 사고 금액과 다를 수 있다.
@@ -17,7 +20,7 @@ robots.txt 확인 결과(crawler/compliance.py): www.bobaedream.co.kr는 'User-a
 
 **대응**: 위 한계 때문에 크롤러가 자동으로 채우지 못하는 정보는 `Listing.verification_links`에
 사람이 직접 클릭해 확인할 수 있는 링크로 담아 함께 제공한다(`_build_verification_links` 참고) —
-매물 상세페이지, 보험이력 팝업(보배드림), 카히스토리 공식 조회, 성능점검기록부 확인 안내.
+매물 상세페이지, 보험이력 팝업(보배드림), 카히스토리 공식 조회, 성능점검기록부 원본.
 
 **2026-09-17 개편**: 목록 조회를 "전량 수집 후 로컬 필터링"에서 "검색 조건을 사이트 목록
 URL(`/mycar/mycar_list.php`)에 실어 서버가 직접 필터링한 결과만 받아오기"로 바꿨다(실측으로
@@ -47,6 +50,7 @@ from normalizer.schema import (
     DamageClaim,
     PerformanceRecord,
     Photos,
+    ThirdPartyInspection,
     UsageHistory,
     Vehicle,
     VerificationLink,
@@ -81,6 +85,8 @@ _CLAIM_KEYWORDS = [
 _SPECIAL_ACCIDENT_RE = re.compile(
     r"전손:\s*(\d+)\s*/\s*침수전손\s*:\s*(\d+)\s*/\s*침수분손\s*:\s*(\d+)\s*/\s*도난:\s*(\d+)"
 )
+
+_LEAK_RE = re.compile(r"누유|누수|누출")
 
 # 정규화된 fuel_type/transmission 값 -> 보배드림 목록 검색 파라미터 코드(실측 확인, 모듈 docstring 참고).
 _FUEL_TO_PARAM = {
@@ -184,6 +190,7 @@ class BobaedreamAdapter(BaseAdapter):
         insurance_history = self._parse_insurance_summary(soup)
         listing_text = self._parse_listing_text(soup)
         photos = self._parse_photos(soup)
+        performance_record = self._read_performance_record(soup)
         verification_links = self._build_verification_links(soup, url)
 
         if self.fetch_insurance_popup:
@@ -195,7 +202,7 @@ class BobaedreamAdapter(BaseAdapter):
             url=url,
             vehicle=vehicle,
             insurance_history=insurance_history,
-            performance_record=PerformanceRecord(),  # 상세페이지에 성능기록부 데이터 없음(위 docstring 참고)
+            performance_record=performance_record,
             dealer=dealer,
             listing_text=listing_text,
             photos=photos,
@@ -446,6 +453,88 @@ class BobaedreamAdapter(BaseAdapter):
             return None
         return BASE_URL + url_match.group(1)
 
+    def _find_performance_popup_url(self, soup: BeautifulSoup) -> Optional[str]:
+        button = soup.select_one('.info-check button[onclick*="mycarChart_5"]')
+        if not button:
+            return None
+        url_match = re.search(r"fNewWin\('([^']+)'", button.get("onclick", ""))
+        return BASE_URL + url_match.group(1) if url_match else None
+
+    def _read_performance_record(self, soup: BeautifulSoup) -> PerformanceRecord:
+        """성능점검 "상세보기" 팝업을 열어 부위별 결과를 읽는다. 못 읽으면 미확인으로 둔다."""
+        popup_url = self._find_performance_popup_url(soup)
+        if not popup_url:
+            return PerformanceRecord()
+        html = self._get_html(popup_url)
+        if html is None:
+            return PerformanceRecord(record_url=popup_url)
+        record = self._parse_performance_record(BeautifulSoup(html, "html.parser"))
+        record.record_url = popup_url
+        return record
+
+    def _parse_performance_record(self, soup: BeautifulSoup) -> PerformanceRecord:
+        record = PerformanceRecord()
+        panel, frame = soup.select_one("#ex_history"), soup.select_one("#in_history")
+        if not panel or not frame:
+            # 기록부를 스캔 이미지로만 올린 매물 — 부위별 판독 불가, 이미지만 넘긴다.
+            for img in soup.select(".scroll-area img"):
+                src = img.get("src", "")
+                record.record_images.append("https:" + src if src.startswith("//") else src)
+            return record
+        record.record_available = True
+
+        for part, state in self._parse_state_table(panel):
+            target = record.panel_exchange if "교환" in state else record.panel_repairs
+            target.append(f"{part} · {state}")
+        record.frame_damage = [f"{part} · {state}" for part, state in self._parse_state_table(frame)]
+        record.third_party_inspection = ThirdPartyInspection(
+            provider="other", frame_ok=not record.frame_damage,
+        )
+
+        # 주요장치 점검표. 병합된(rowspan) 제목 칸은 아래 행들에도 이어 붙여
+        # "원동기 · 오일누유 · 실린더헤드"처럼 완전한 항목명을 만든다.
+        for table in soup.select(".p-performance-check .check-list .tbl-01 table"):
+            carried: list[list] = []  # [제목, 남은 행 수]
+            for row in table.select("tbody tr"):
+                labels = [label for label, _ in carried]
+                carried = [[label, left - 1] for label, left in carried if left > 1]
+                for th in row.select("th"):
+                    label = th.get_text(" ", strip=True)
+                    labels.append(label)
+                    if int(th.get("rowspan") or 1) > 1:
+                        carried.append([label, int(th["rowspan"]) - 1])
+                cells = row.select("td")
+                if len(cells) != 1 or not labels:
+                    continue
+                value = cells[0].get_text(" ", strip=True)
+                if not value:
+                    continue
+                key = " · ".join(labels)
+                record.inspection_results[key] = value
+                # "냉각수 누수" 묶음 아래의 "냉각수량: 적정"처럼 누유 여부가 아닌 항목은 제외한다.
+                if _LEAK_RE.search(value) or (_LEAK_RE.search(labels[-1]) and value not in ("없음", "양호")):
+                    record.leak_records.append(f"{key}: {value}")
+        for th in soup.select(".p-performance-check .popup-section:not(.check-list) th"):
+            label = th.get_text(" ", strip=True)
+            td = th.find_next_sibling("td")
+            if td and any(k in label for k in ("사고유무", "침수유무", "불법구조변경", "동일성확인", "보증유형")):
+                record.inspection_results[label] = td.get_text(" ", strip=True)
+        return record
+
+    def _parse_state_table(self, table) -> list[tuple[str, str]]:
+        """외판/주요골격 표에서 표시가 있는 (부위, 상태)만 돌려준다. 빈 칸은 이상 없음이다."""
+        # 열 제목: "교환(교체)" / "판금/용접" / "부식"
+        columns = [re.sub(r"\(.*?\)", "", th.get_text(" ", strip=True)) for th in table.select("thead th")][1:]
+        found = []
+        for row in table.select("tbody tr"):
+            if not row.th:
+                continue
+            part = re.sub(r"^\d+\.\s*", "", row.th.get_text(" ", strip=True))
+            for column, cell in zip(columns, row.select("td")):
+                if cell.select_one(".i-mark"):
+                    found.append((part, column))
+        return found
+
     def _find_plate_number(self, soup: BeautifulSoup) -> Optional[str]:
         # 실제 DOM에서는 "차량번호 000가0000"처럼 라벨과 번호가 하나의 텍스트 노드에 붙어있다.
         full_text = soup.get_text(" ", strip=True)
@@ -485,15 +574,22 @@ class BobaedreamAdapter(BaseAdapter):
             ),
         ))
 
-        links.append(VerificationLink(
-            label="성능점검기록부 확인 안내",
-            url=detail_url,
-            note=(
-                "이 어댑터는 외판교환/프레임손상/누유 데이터를 확보하지 못한다. "
-                "매물 상세페이지 하단 또는 판매자에게 성능점검기록부 원본을 별도로 요청해 "
-                "프레임(뼈대) 손상 여부를 직접 확인할 것"
-            ),
-        ))
+        performance_url = self._find_performance_popup_url(soup)
+        if performance_url:
+            links.append(VerificationLink(
+                label="성능점검기록부 원본(보배드림)",
+                url=performance_url,
+                note="판매자가 입력한 기록부 — 실차·기록부 원본과 대조해 프레임(뼈대) 손상 여부 확인",
+            ))
+        else:
+            links.append(VerificationLink(
+                label="성능점검기록부 확인 안내",
+                url=detail_url,
+                note=(
+                    "이 매물에는 등록된 성능점검기록부가 없다. 판매자에게 성능점검기록부 원본을 "
+                    "별도로 요청해 프레임(뼈대) 손상 여부를 직접 확인할 것"
+                ),
+            ))
 
         return links
 

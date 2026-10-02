@@ -5,8 +5,10 @@
 필터를 설정하고 검색 결과를 가져오는 동작은 실브라우저(Selenium/Playwright) 기반이 더
 적합하다고 판단했다 — 이 프로젝트는 개인 용도 도구이므로 그 방향을 그대로 따른다.
 
-한 번 띄운 브라우저 컨텍스트를 여러 어댑터가 공유해서 재사용한다(검색 1회당 브라우저를
-새로 띄우면 느리다). robots.txt를 준수하는 소스만 이 계층으로 요청하며(crawler/compliance.py),
+한 번 띄운 브라우저 컨텍스트를 같은 스레드의 여러 요청이 재사용한다(CLI 배치 검색에서
+요청마다 브라우저를 새로 띄우면 느리다). Playwright sync 세션은 **만든 스레드에서만** 쓰고 닫을
+수 있고 한 스레드에 하나만 열 수 있으므로, 여러 스레드가 요청을 처리하는 웹 서버(`server.py`)는
+조회마다 `BrowserFetcher`를 새로 만들고 그 스레드에서 `close()`한다. robots.txt를 준수하는 소스만 이 계층으로 요청하며(crawler/compliance.py),
 사이트가 실제 봇 차단(캡차/챌린지 페이지)을 걸면 우회하지 않고 그대로 실패로 처리한다 —
 User-Agent 위장이나 자동화 감지 회피 스크립트는 넣지 않는다.
 """
@@ -121,13 +123,18 @@ class BrowserFetcher:
             return None
 
     def close(self) -> None:
-        if self._context:
-            self._context.close()
-        if self._browser:
-            self._browser.close()
-        if self._pw:
-            self._pw.stop()
-        self._context = self._browser = self._pw = None
+        # stop()이 빠지면 이 스레드에서 다음 Playwright 세션을 열 수 없으므로 앞 단계가 실패해도 실행한다.
+        try:
+            if self._context:
+                self._context.close()
+            if self._browser:
+                self._browser.close()
+        finally:
+            try:
+                if self._pw:
+                    self._pw.stop()
+            finally:
+                self._context = self._browser = self._pw = None
 
     def __enter__(self) -> "BrowserFetcher":
         return self

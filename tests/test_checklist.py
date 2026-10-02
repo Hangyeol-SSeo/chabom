@@ -118,6 +118,54 @@ def test_encar_summary_without_coverage_confirmation_forces_hold():
     assert result.overall == "hold"
 
 
+def test_owner_changes_are_caution_not_disqualifying():
+    listing = clean_listing()
+    listing.insurance_history.owner_change_count = 4
+    result = evaluate_checklist(listing, weights=WEIGHTS)
+    assert item(result, "owner_change").verdict == "caution"
+    assert "4회" in item(result, "owner_change").detail
+    assert result.overall == "proceed"
+
+
+def test_panel_exchange_and_repair_are_caution_not_disqualifying():
+    listing = clean_listing()
+    listing.performance_record.record_available = True
+    listing.performance_record.panel_exchange = ["프론트 휀더(우) · 교환"]
+    listing.performance_record.panel_repairs = ["리어 도어(우) · 판금/용접"]
+    result = evaluate_checklist(listing, weights=WEIGHTS)
+    panel = item(result, "panel_exchange")
+    assert panel.verdict == "caution"
+    assert "2곳" in panel.detail and "리어 도어(우) · 판금/용접" in panel.detail
+    assert result.overall == "proceed"
+
+
+def test_summarized_panel_counts_are_not_reported_as_part_counts():
+    listing = clean_listing()
+    listing.performance_record.panel_exchange_count = 3
+    listing.performance_record.panel_exchange = ["외판 교환 3건(케이카 진단)"]
+    panel = item(evaluate_checklist(listing, weights=WEIGHTS), "panel_exchange")
+    assert panel.verdict == "caution"
+    assert "곳" not in panel.detail and "외판 교환 3건(케이카 진단)" in panel.detail
+
+
+def test_image_only_record_does_not_claim_no_panel_work():
+    listing = clean_listing()
+    listing.performance_record.record_available = True
+    listing.performance_record.record_images = ["https://images.example.com/record_1.jpg"]
+    result = evaluate_checklist(listing, weights=WEIGHTS)
+    assert all(i.key != "panel_exchange" for i in result.items)
+
+
+def test_frame_damage_still_fails_and_names_the_parts():
+    listing = clean_listing()
+    listing.performance_record.frame_damage = ["리어 패널 · 교환"]
+    listing.performance_record.third_party_inspection.frame_ok = False
+    result = evaluate_checklist(listing, weights=WEIGHTS)
+    assert item(result, "frame_damage").verdict == "fail"
+    assert "리어 패널 · 교환" in item(result, "frame_damage").detail
+    assert result.overall == "hold"
+
+
 def test_kcar_summary_without_insurance_detail_forces_hold():
     listing = clean_listing()
     listing.source = "kcar"

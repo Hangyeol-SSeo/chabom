@@ -132,11 +132,22 @@
     if(state.sort!=='recent')items.sort((a,b)=>{const x=a.listing?.vehicle?.price_krw,y=b.listing?.vehicle?.price_krw;if(x==null)return y==null?0:1;if(y==null)return -1;return state.sort==='price-low'?x-y:y-x;});
     $('carResults').innerHTML=state.loading?empty('불러오는 중','저장된 차량을 확인하고 있습니다.'):items.length?`<div class="list-meta"><span>${items.length}대의 차량</span><span>차량명을 눌러 상세 확인</span></div><div class="car-list">${items.map(carRow).join('')}</div>`:empty(search||state.related?'검색 결과가 없습니다.':state.filter==='favorite'?'아직 찜한 매물이 없습니다.':'첫 번째 차량을 추가해보세요.',search||state.related?'다른 검색어나 필터를 선택해주세요.':state.filter==='favorite'?'차량 옆 하트를 누르면 여기에 모입니다.':'매물 링크 하나로 차량 확인을 시작할 수 있습니다.',state.filter==='favorite'?'<button class="button secondary" data-action="car-filter" data-value="all">전체 차량 보기</button>':newCarButton());
   }
+  const verdictLabel={pass:'통과',fail:'결격',unknown:'미확인',caution:'주의'},verdictTone={pass:'green',fail:'red',unknown:'amber',caution:'amber'},verdictRank={fail:0,unknown:1,caution:2,pass:3};
+  const verdictItems=(check,verdict)=>(check?.items||[]).filter(i=>i.verdict===verdict&&(verdict!=='unknown'||i.critical));
+  const shortReason=i=>(i.verdict==='caution'?'':i.label+': ')+i.detail.split(' — ')[0];
+  function checkPills(check){
+    if(!check)return '';
+    const fails=verdictItems(check,'fail').length,cautions=verdictItems(check,'caution').length,unknown=verdictItems(check,'unknown').length;
+    return (fails?`<span class="pill red">결격 ${fails}</span>`:'')+(cautions?`<span class="pill amber">주의 ${cautions}</span>`:'')+(unknown?`<span class="pill">미확인 ${unknown}</span>`:'')+(!fails&&check.overall==='proceed'?'<span class="pill green">핵심 통과</span>':'');
+  }
+  function checkFlags(check){
+    return [['fail','결격'],['caution','주의']].map(([verdict,word])=>verdictItems(check,verdict).map(i=>`<p class="car-flag ${verdict}"><strong>${word}</strong>${esc(shortReason(i))}</p>`).join('')).join('');
+  }
   function carRow(item){
     const l=item.listing,v=l?.vehicle||{},d=state.dealers.find(d=>d.source===(l?.source||item.source)&&d.dealer_key===l?.dealer?.dealer_id);
     const photo=(l?.photos?.urls||[]).find(u=>safeURL(u)&&!/(logo|assets|bobae\.png)/i.test(u));
     const facts=[v.model_year?`${v.model_year}년`:null,v.mileage_km!=null?`${v.mileage_km.toLocaleString()} km`:null,v.region||null].filter(Boolean).join(' · ');
-    return `<article class="car-row"><div class="car-main"><div class="car-visual">${icon('car')}${photo?`<img src="${esc(safeURL(photo))}" alt="" loading="lazy" referrerpolicy="no-referrer">`:''}</div><div class="car-copy"><div class="pills"><span class="pill">${esc(sourceName(item.source))}</span>${item.status==='failed'?'<span class="pill amber">조회 실패</span>':''}${d?.blacklisted?'<span class="pill red">제외 딜러</span>':''}${item.origin==='snapshot'?'<span class="pill">기존 저장</span>':''}</div><button class="car-title" data-action="open-car" data-id="${item.id}">${esc(titleOf(l))}</button><p class="car-facts">${esc(facts||'상세 정보를 입력해주세요.')}</p></div></div>
+    return `<article class="car-row"><div class="car-main"><div class="car-visual">${icon('car')}${photo?`<img src="${esc(safeURL(photo))}" alt="" loading="lazy" referrerpolicy="no-referrer">`:''}</div><div class="car-copy"><div class="pills"><span class="pill">${esc(sourceName(item.source))}</span>${item.status==='failed'?'<span class="pill amber">조회 실패</span>':''}${d?.blacklisted?'<span class="pill red">제외 딜러</span>':''}${item.origin==='snapshot'?'<span class="pill">기존 저장</span>':''}${checkPills(item.check)}</div><button class="car-title" data-action="open-car" data-id="${item.id}">${esc(titleOf(l))}</button><p class="car-facts">${esc(facts||'상세 정보를 입력해주세요.')}</p>${checkFlags(item.check)}</div></div>
       <div class="car-price">${priceOf(l)}<br><a class="row-link" href="${esc(safeURL(item.url))}" target="_blank" rel="noopener noreferrer">원문 보기${icon('arrow')}</a></div>
       <button class="icon-button" data-action="favorite-car" data-id="${item.id}" aria-pressed="${item.favorite}" aria-label="${esc(titleOf(l))} ${item.favorite?'찜 해제':'찜하기'}">${icon('heart')}</button></article>`;
   }
@@ -181,13 +192,17 @@
       ${events.length?`<div class="evidence-block"><h3>변경 및 차량 이력 ${events.length}건</h3><ol class="history-events">${events.map(event=>`<li><time>${esc(event.date||'날짜 미확인')}</time><div><strong>${esc(event.category)}</strong>${event.summary?`<p>${esc(event.summary)}</p>`:''}${Object.keys(event.details||{}).length?`<dl>${Object.entries(event.details).map(([key,value])=>`<div><dt>${esc(key)}</dt><dd>${esc(value)}</dd></div>`).join('')}</dl>`:''}</div></li>`).join('')}</ol></div>`:''}
     </section>`;
   }
+  const hasPerformanceRecord = l => {const pr=l.performance_record||{};return !!(pr.record_available||pr.record_url||pr.record_images?.length);};
   function renderPerformanceDetails(l){
-    const pr=l.performance_record||{},frame=pr.third_party_inspection?.frame_ok,results=Object.entries(pr.inspection_results||{});
+    const pr=l.performance_record||{},frame=pr.third_party_inspection?.frame_ok,results=Object.entries(pr.inspection_results||{}),images=(pr.record_images||[]).map(safeURL).filter(Boolean);
+    const note=l.source==='kcar'?'케이카 진단 수치와 성능기록부 원본을 함께 표시합니다. 기록부 이미지의 체크 항목은 직접 확인해주세요.':pr.record_available?`${sourceName(l.source)}에 등록된 점검기록부에서 확인한 내용입니다.`:images.length?'점검기록부가 이미지로만 등록되어 부위별 결과를 자동으로 읽지 못했습니다. 아래 원본 이미지에서 직접 확인해주세요.':'점검기록부의 부위별 결과를 가져오지 못했습니다. 원본을 확인해주세요.';
+    // 케이카는 부위 목록 없이 진단 건수(panel_exchange_count)만 준다 — 부위 수를 세는 칸은 부위 목록이 있는 사이트에만 둔다.
+    const counted=pr.panel_exchange_count!=null,listed=pr.record_available&&!images.length;
     return `<section class="panel evidence-panel"><div class="panel-heading"><h2>성능·상태 점검기록부</h2>${safeURL(pr.record_url)?`<a class="row-link" href="${esc(safeURL(pr.record_url))}" target="_blank" rel="noopener noreferrer">기록부 원본${icon('arrow')}</a>`:''}</div>
-      <p class="form-note">${l.source==='kcar'?'케이카 진단 수치와 성능기록부 원본을 함께 표시합니다. 기록부 이미지의 체크 항목은 직접 확인해주세요.':pr.record_available?'엔카에 등록된 점검기록부에서 확인한 내용입니다.':'점검기록부의 부위별 결과를 가져오지 못했습니다. 원본을 확인해주세요.'}</p>
-      <div class="evidence-metrics"><div><span>주요골격</span><strong>${frame===true?'손상 없음':frame===false?'손상 확인':'미확인'}</strong></div><div><span>외판 교환</span><strong>${pr.panel_exchange_count!=null?countLabel(pr.panel_exchange_count):pr.record_available?countLabel((pr.panel_exchange||[]).length):'미확인'}</strong></div></div>
-      ${[['주요골격 손상',pr.frame_damage],['외판 교환',pr.panel_exchange],['외판 기타 수리',pr.panel_repairs],['누유·누수',pr.leak_records]].filter(([,items])=>items?.length).map(([label,items])=>`<div class="evidence-block"><h3>${label}</h3><ul class="evidence-list">${items.map(item=>`<li>${esc(item)}</li>`).join('')}</ul></div>`).join('')}
-      ${pr.record_images?.length?`<div class="evidence-block"><h3>성능기록부 원본 ${pr.record_images.length}쪽</h3><div class="record-pages">${pr.record_images.map((url,index)=>safeURL(url)?`<a href="${esc(safeURL(url))}" target="_blank" rel="noopener noreferrer"><img src="${esc(safeURL(url))}" alt="성능기록부 ${index+1}쪽" loading="lazy" referrerpolicy="no-referrer"><span>원본 ${index+1}쪽 열기${icon('arrow')}</span></a>`:'').join('')}</div></div>`:''}
+      <p class="form-note">${esc(note)}</p>
+      <div class="evidence-metrics"><div><span>주요골격</span><strong>${frame===true?'손상 없음':frame===false?'손상 확인':'미확인'}</strong></div><div><span>외판 교환</span><strong>${counted?countLabel(pr.panel_exchange_count):listed?countLabel((pr.panel_exchange||[]).length):'미확인'}</strong></div>${counted?'':`<div><span>외판 판금·기타 수리</span><strong>${listed?countLabel((pr.panel_repairs||[]).length):'미확인'}</strong></div>`}</div>
+      ${[['주요골격 손상',pr.frame_damage],['외판 교환',pr.panel_exchange],['외판 판금·기타 수리',pr.panel_repairs],['누유·누수',pr.leak_records]].filter(([,items])=>items?.length).map(([label,items])=>`<div class="evidence-block"><h3>${label}</h3><ul class="evidence-list">${items.map(item=>`<li>${esc(item)}</li>`).join('')}</ul></div>`).join('')}
+      ${images.length?`<div class="evidence-block"><h3>성능기록부 원본 ${images.length}쪽</h3><div class="record-pages">${images.map((url,index)=>`<a href="${esc(url)}" target="_blank" rel="noopener noreferrer"><img src="${esc(url)}" alt="성능기록부 ${index+1}쪽" loading="lazy" referrerpolicy="no-referrer"><span>원본 ${index+1}쪽 열기${icon('arrow')}</span></a>`).join('')}</div></div>`:''}
       ${results.length?`<details class="inspection-details"><summary>성능 세부 점검 ${results.length}항목 보기</summary><dl class="evidence-pairs">${results.map(([key,value])=>`<div><dt>${esc(key)}</dt><dd>${esc(value)}</dd></div>`).join('')}</dl></details>`:''}
     </section>`;
   }
@@ -197,7 +212,7 @@
     const item=state.history.find(i=>i.id===state.historyId);
     $('main').innerHTML=`<button class="back-link" data-action="back">${icon('back')}차량 보관함</button><div class="detail-title"><div><div class="pills"><span class="pill">${esc(sourceName(l.source))}</span>${item?`<span class="pill">${esc(shortDate(item.last_viewed_at))} 저장</span>`:''}</div><h1>${esc(titleOf(l)==='차량 정보 미확인'?'차량 정보 확인':titleOf(l))}</h1><p class="subtitle">${item?'저장된 정보를 확인하고 필요한 항목을 보완하세요.':'차량 정보와 핵심 이력을 확인해주세요.'}</p></div>${item?`<button class="icon-button" data-action="favorite-car" data-id="${item.id}" aria-pressed="${item.favorite}" aria-label="${item.favorite?'매물 찜 해제':'매물 찜하기'}">${icon('heart')}</button>`:''}</div>
       ${item?.status==='failed'?'<p class="inline-message error">최근 조회에 실패했습니다. 이전 저장 정보를 확인하거나 직접 입력해주세요.</p>':''}
-      <div class="detail-layout"><div><div id="verificationResult" tabindex="-1"></div>${['encar','kcar'].includes(l.source)?(ih.history_detail_status==='login_required'?renderSiteConnection(l.source):'')+renderHistoryDetails(l)+renderPerformanceDetails(l):''}<form id="vehicleForm">
+      <div class="detail-layout"><div><div id="verificationResult" tabindex="-1"></div>${['encar','kcar'].includes(l.source)?(ih.history_detail_status==='login_required'?renderSiteConnection(l.source):'')+renderHistoryDetails(l)+renderPerformanceDetails(l):hasPerformanceRecord(l)?renderPerformanceDetails(l):''}<form id="vehicleForm">
       <section class="panel"><div class="panel-heading"><h2><span class="step-number">01</span>차량 정보</h2>${safeURL(l.url)?`<a class="row-link" href="${esc(safeURL(l.url))}" target="_blank" rel="noopener noreferrer">원문 보기${icon('arrow')}</a>`:''}</div>
       <div class="form-grid three">${field('make','제조사',v.make)}${field('model','모델',v.model)}${field('trim','트림',v.trim)}</div><div class="form-grid three">${field('year','연식',v.model_year,'number','max="2100"')}${field('mileage','주행거리 · km',v.mileage_km,'number')}${field('price','가격 · 만원',v.price_krw!=null?v.price_krw/10000:'','number','step="0.01"')}</div></section>
       <section class="panel"><div class="panel-heading"><h2><span class="step-number">02</span>핵심 이력 확인</h2><span class="pill green" id="checkProgress"></span></div><p class="form-note" style="margin-bottom:20px">원본에서 확인한 항목만 선택해주세요. 미확인 항목은 구매 보류로 처리됩니다.</p><div>${checks.map(([key,label,good,bad,goodValue])=>{const value=key==='frame_ok'?l.performance_record?.third_party_inspection?.frame_ok:ih[key];return `<fieldset class="check-row"><legend>${label}</legend><div class="tri">${[[goodValue,good],[!goodValue,bad],[null,'미확인']].map(([val,text])=>`<label><input type="radio" name="${key}" value="${val}" ${(value??null)===val?'checked':''}><span>${text}</span></label>`).join('')}</div>${key==='history_disclosed'?`<label class="check-extra"><input type="checkbox" id="coverageVerified" ${ih.coverage_verified?'checked':''}>상세 화면에서 자차보험 미가입 기간 여부 확인</label><label class="check-extra"><input type="checkbox" id="infoGap" ${ih.info_unavailable_periods?.length?'checked':''}>조회되지 않는 기간이 있었음</label>`:''}</fieldset>`;}).join('')}</div></section>
@@ -235,11 +250,17 @@
     finally{if($('verifyButton')){$('verifyButton').disabled=false;$('verifyButton').innerHTML='저장하고 검증하기'+icon('arrow');}}
   }
   function renderResult(){
-    const el=$('verificationResult');if(!el)return;const result=state.result;$('vehicleForm').hidden=!!result;if(!result){el.innerHTML='';return;}
+    const el=$('verificationResult');if(!el)return;
+    // 검증 버튼을 누르기 전에는 저장된 정보 기준 판정을 그대로 보여준다.
+    const auto=!state.result,result=state.result||state.history.find(i=>i.id===state.historyId)?.check;
+    $('vehicleForm').hidden=!!state.result;if(!result){el.innerHTML='';return;}
     const proceed=result.overall==='proceed';
-    const ordered=[...result.items].sort((a,b)=>({fail:0,unknown:1,pass:2}[a.verdict]-{fail:0,unknown:1,pass:2}[b.verdict]));
-    const missing=result.items.filter(i=>i.critical&&i.verdict==='unknown').length,failed=result.items.filter(i=>i.critical&&i.verdict==='fail').length;
-    el.innerHTML=`<div class="result-banner ${proceed?'proceed':''}"><h2>${proceed?'핵심 항목 통과':'구매 보류 · 추가 확인 필요'}</h2><p>${proceed?'확인된 핵심 항목에서 결격 사유가 발견되지 않았습니다.':`미확인 ${missing}개 · 결격 ${failed}개. 아래 항목을 확인해주세요.`}</p></div><div class="result-list">${ordered.map(i=>`<details class="result-item" ${i.critical&&i.verdict!=='pass'?'open':''}><summary><span>${esc(i.label)}${i.critical?'<small>핵심</small>':''}</span><span class="pill ${i.verdict==='pass'?'green':i.verdict==='fail'?'red':'amber'}">${{pass:'통과',fail:'결격',unknown:'미확인'}[i.verdict]}</span></summary><p>${esc(i.detail)}</p></details>`).join('')}</div><div class="form-footer" style="margin-bottom:24px"><p class="form-note">저장된 정보와 입력한 답변에 따른 결과입니다.</p><button class="button secondary" data-action="edit-verification">입력 내용 수정</button></div>`;
+    const failed=verdictItems(result,'fail').length,missing=verdictItems(result,'unknown').length,cautions=verdictItems(result,'caution').length,passed=result.items.filter(i=>i.verdict==='pass').length;
+    const ordered=[...result.items].filter(i=>!auto||i.verdict!=='pass').sort((a,b)=>verdictRank[a.verdict]-verdictRank[b.verdict]);
+    const counts=[failed?`결격 ${failed}개`:'',missing?`미확인 ${missing}개`:'',cautions?`주의 ${cautions}개`:''].filter(Boolean).join(' · ');
+    const title=failed?`결격 사유 ${failed}건`:proceed?'핵심 항목 통과':'구매 보류 · 추가 확인 필요';
+    const summary=failed||!proceed?`${counts}. 아래 항목을 확인해주세요.`:`확인된 핵심 항목에서 결격 사유가 발견되지 않았습니다.${cautions?` 주의 ${cautions}개는 참고해주세요.`:''}`;
+    el.innerHTML=`<div class="result-banner ${failed?'fail':proceed?'proceed':''}"><h2>${title}</h2><p>${summary}</p></div>${ordered.length?`<div class="result-list">${ordered.map(i=>`<details class="result-item" ${i.verdict!=='pass'?'open':''}><summary><span>${esc(i.label)}${i.critical?'<small>핵심</small>':''}</span><span class="pill ${verdictTone[i.verdict]}">${verdictLabel[i.verdict]}</span></summary><p>${esc(i.detail)}</p></details>`).join('')}</div>`:''}${auto?`<p class="form-note" style="margin-bottom:24px">불러온 정보 기준 자동 판정입니다${passed?` (통과 ${passed}개 항목 생략)`:''}. 답변을 바꾼 뒤 저장하고 검증하면 다시 판정합니다.</p>`:'<div class="form-footer" style="margin-bottom:24px"><p class="form-note">저장된 정보와 입력한 답변에 따른 결과입니다.</p><button class="button secondary" data-action="edit-verification">입력 내용 수정</button></div>'}`;
   }
   function renderDetailDealer(){
     const el=$('detailDealer');if(!el)return;const d=draftDealer();

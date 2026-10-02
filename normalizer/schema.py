@@ -132,7 +132,7 @@ class PerformanceRecord:
     leak_records: list[str] = field(default_factory=list)
     inspection_results: dict[str, str] = field(default_factory=dict)
     record_url: str = ""
-    record_images: list[str] = field(default_factory=list)
+    record_images: list[str] = field(default_factory=list)  # 기록부가 이미지로 등록·제공된 경우
     record_available: bool = False
     third_party_inspection: ThirdPartyInspection = field(default_factory=ThirdPartyInspection)
 
