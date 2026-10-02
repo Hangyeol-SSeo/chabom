@@ -133,7 +133,7 @@ def _insurance_history_item(listing: Listing) -> ChecklistItem:
             "사고 이력이 누락됐을 수 있습니다",
             critical=True,
         )
-    if not ih.coverage_verified and listing.source == "encar":
+    if not ih.coverage_verified and listing.source in {"encar", "kcar"}:
         return ChecklistItem(
             "insurance_history", "보험이력 조회", "unknown",
             "차량이력 요약만으로는 자차 보험 미가입 기간이 없다고 확인할 수 없습니다 — 상세 이력 확인 필요",
@@ -190,17 +190,21 @@ def _informational_items(listing: Listing) -> list[ChecklistItem]:
         kinds = ", ".join(k for k, used in [("렌트", ih.usage_history.rental_used), ("택시", ih.usage_history.taxi_used), ("영업용", ih.usage_history.business_used)] if used)
         items.append(ChecklistItem("commercial_use", "영업용 이력", "fail", f"{kinds} 이력이 확인되었습니다", critical=False))
 
+    # 케이카는 부위 목록 대신 진단 건수 요약(panel_exchange_count)만 준다 — 이때는 "N곳"으로 세지 않는다.
     panel_work = [*pr.panel_exchange, *pr.panel_repairs]
+    summarized = pr.panel_exchange_count is not None
     if panel_work:
+        scope = "이력" if summarized else f"{len(panel_work)}곳"
         items.append(ChecklistItem(
             "panel_exchange", "외판(패널) 교환·판금", "caution",
-            f"외판 수리 {len(panel_work)}곳: {', '.join(panel_work)} — 뼈대 손상은 아니라 결격 사유는 아니지만, "
+            f"외판 수리 {scope}: {', '.join(panel_work)} — 뼈대 손상은 아니라 결격 사유는 아니지만, "
             "부위가 많을수록 불리합니다",
             critical=False,
         ))
-    elif pr.record_available:
+    elif summarized or (pr.record_available and not pr.record_images):
+        # 기록부가 이미지로만 있으면 부위를 읽지 못한 것이므로 "이력 없음"이라고 단정하지 않는다.
         items.append(ChecklistItem(
-            "panel_exchange", "외판(패널) 교환·판금", "pass", "성능기록부에 외판 교환·판금 이력이 없습니다",
+            "panel_exchange", "외판(패널) 교환·판금", "pass", "확인된 외판 교환·판금 이력이 없습니다",
             critical=False,
         ))
 

@@ -35,6 +35,7 @@ from fastapi import FastAPI, HTTPException, Request
 from contextlib import closing
 from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -42,7 +43,8 @@ from crawler.adapters.bobaedream_adapter import BobaedreamAdapter
 from crawler.adapters.encar_detail_adapter import AUTH_STATE_PATH, EncarDetailAdapter
 from crawler.encar_session import EncarSessionManager
 from crawler.adapters.kbchachacha_adapter import KbchachachaAdapter
-from crawler.adapters.kcar_detail_adapter import KcarDetailAdapter
+from crawler.adapters.kcar_detail_adapter import AUTH_STATE_PATH as KCAR_AUTH_STATE_PATH, KcarDetailAdapter
+from crawler.site_session import SiteSessionManager
 from normalizer.schema import Listing
 from scoring.checklist import ChecklistResult, DealerStatus, evaluate_checklist
 from scoring.scorer import load_weights
@@ -61,6 +63,7 @@ app.add_middleware(
 )
 
 _encar_session = EncarSessionManager(AUTH_STATE_PATH)
+_kcar_session = SiteSessionManager(KCAR_AUTH_STATE_PATH, "https://www.kcar.com/")
 _weights = load_weights()
 DEALERS_DB_PATH = Path(__file__).parent / "data/dealers.db"
 HISTORY_DB_PATH = Path(__file__).parent / "data/listings.db"
@@ -81,7 +84,7 @@ _SOURCE_HOSTS = {
 # 어댑터는 조회마다 새로 만들고, 각자 자기 브라우저 세션을 연다(_lookup에서 같은 스레드로 닫는다).
 # Playwright sync 세션은 만든 스레드에서만 쓰고 닫을 수 있고 한 스레드에 하나만 열 수 있어서,
 # 서버 전체가 세션 하나를 공유하면 요청 스레드가 바뀌거나 다른 사이트를 이어서 조회할 때 실패한다.
-# Encar는 로그인 상태 파일도 이렇게 조회마다 새 컨텍스트에 반영된다.
+# Encar·K Car는 저장된 탐색 세션 파일도 이렇게 조회마다 새 컨텍스트에 반영된다.
 _ADAPTERS = {
     "bobaedream": BobaedreamAdapter,
     "kbchachacha": KbchachachaAdapter,
@@ -159,13 +162,41 @@ async def encar_session_cancel(request: Request) -> dict:
     return {"status": await _encar_session.cancel()}
 
 
+@app.get("/api/kcar/session")
+def kcar_session_status() -> dict:
+    return {"status": _kcar_session.status()}
+
+
+@app.post("/api/kcar/session/start")
+async def kcar_session_start(request: Request) -> dict:
+    _require_local_json(request)
+    try:
+        return {"status": await _kcar_session.start()}
+    except Exception as exc:
+        logger.warning("K Car 탐색 창 열기 실패: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="케이카 창을 열지 못했습니다. 브라우저 실행 상태를 확인해주세요.") from None
+
+
+@app.post("/api/kcar/session/cancel")
+async def kcar_session_cancel(request: Request) -> dict:
+    _require_local_json(request)
+    return {"status": await _kcar_session.cancel()}
+
+
 @app.post("/api/lookup")
-def lookup(req: LookupRequest) -> dict:
+async def lookup(req: LookupRequest) -> dict:
     try:
         url = history_store.normalize_url(req.url)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    result = _lookup(LookupRequest(url=url))
+    source = _identify_source(url)[0]
+    session = {"encar": _encar_session, "kcar": _kcar_session}.get(source)
+    if session:
+        try:
+            await session.snapshot()
+        except Exception as exc:
+            logger.warning("%s 탐색 창 세션 저장 실패: %s", source, type(exc).__name__)
+    result = await run_in_threadpool(_lookup, LookupRequest(url=url))
     if result.get('listing'):
         listing = Listing.from_dict(result['listing'])
         with closing(dealer_store.get_connection(DEALERS_DB_PATH)) as conn:
@@ -409,6 +440,7 @@ def _result_to_dict(result: ChecklistResult, listing: Listing) -> dict:
 @app.on_event("shutdown")
 async def _shutdown() -> None:
     await _encar_session.close()
+    await _kcar_session.close()
 
 
 app.mount("/", StaticFiles(directory="web", html=True), name="web")

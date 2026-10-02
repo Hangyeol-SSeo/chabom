@@ -7,6 +7,7 @@ from __future__ import annotations
 from bs4 import BeautifulSoup
 
 from crawler.adapters.kcar_detail_adapter import CARHISTORY_URL, KcarDetailAdapter
+from normalizer.schema import InsuranceHistory
 
 DETAIL_HTML = """
 <html><head><title>차량상세 직영 중고차</title></head>
@@ -69,7 +70,9 @@ def test_parse_performance_record_separates_panel_and_frame():
     # 프레임 판금 1건이라도 있으면 frame_ok=False여야 한다(외판과는 별개 신호).
     assert pr.third_party_inspection.frame_ok is False
     assert pr.frame_damage == ["프레임 판금 1건/교환 0건(케이카 진단)"]
-    assert pr.panel_exchange == ["외판 판금 2건/교환 1건(케이카 진단)"]
+    assert pr.panel_exchange == ["외판 교환 1건(케이카 진단)"]
+    assert pr.panel_exchange_count == 1
+    assert pr.panel_repairs == ["외판 판금 2건(케이카 진단)"]
 
 
 def test_parse_performance_record_frame_ok_when_zero():
@@ -81,6 +84,58 @@ def test_parse_performance_record_frame_ok_when_zero():
     pr = adapter._parse_performance_record(BeautifulSoup(html, "html.parser"))
     assert pr.third_party_inspection.frame_ok is True
     assert pr.frame_damage == []
+
+
+def test_absent_frame_diagnosis_stays_unknown():
+    html = DETAIL_HTML.replace('<div id="frame" class="repair_frame"><div id="index"><ul class="labels"><li>판금 1건</li><li>교환 0건</li></ul></div></div>', '')
+    record = KcarDetailAdapter.__new__(KcarDetailAdapter)._parse_performance_record(BeautifulSoup(html, "html.parser"))
+    assert record.third_party_inspection.frame_ok is None
+
+
+def test_parse_insurance_and_timeline_dialogs_with_dates_and_gap():
+    adapter = KcarDetailAdapter.__new__(KcarDetailAdapter)
+    history = InsuranceHistory(owner_change_count=None)
+    insurance_html = '''<div class="el-dialog__body"><h2>보험사고이력 상세 정보</h2>
+      <div class="hisBox"><ul>
+        <li><p>소유자 변경</p><strong>2회</strong></li><li><p>차량번호 변경</p><strong>1회</strong></li>
+        <li><p>전손 보험사고</p><strong>없음</strong></li><li><p>도난 보험사고</p><strong>없음</strong></li>
+        <li><p>침수 보험사고</p><strong>없음</strong></li>
+        <li><p>내차 피해</p><strong>1회(1,000,000원)</strong></li>
+        <li><p>상대차 피해</p><strong>없음</strong></li>
+      </ul></div><div class="boxDesc insuBox"><div class="insuTxt"><strong>2020년 01월 ~ 2020년 03월</strong></div></div>
+      <table class="hisTb"><tbody>
+        <tr><td>2022.07.01</td><td>소유자 변경</td><td>00가0000</td><td>자가용</td></tr>
+        <tr><td>2021.03.14</td><td>소유자 변경</td><td>-</td><td>영업용</td></tr>
+      </tbody></table></div>'''
+    adapter._parse_insurance_dialog(BeautifulSoup(insurance_html, "html.parser"), history)
+    assert history.history_detail_status == "available"
+    assert history.coverage_verified is True
+    assert history.owner_change_count == 2
+    assert history.number_change_count == 1
+    assert history.usage_change_count == 1
+    assert history.flood_damage is False
+    assert history.own_damage_count == 1
+    assert history.own_damage_total_krw == 1_000_000
+    assert history.info_unavailable_periods[0].start == "2020-01-01"
+    assert history.info_unavailable_periods[0].end == "2020-03-31"
+    timeline_html = '''<ul>
+      <li class="cell toggle"><div class="cell-top"><span class="label">소유자 변경</span><span class="value">2021.03.14</span></div><div class="cell-content"><ul class="dot-list"><li><p>변경 사유: 합성 거래</p></li></ul></div></li>
+      <li class="cell toggle"><div class="cell-top"><span class="label">용도 변경</span><span class="value">2022.07.01</span></div><div class="cell-content"><ul class="dot-list"><li><p>영업용에서 자가용으로 변경</p></li></ul></div></li>
+    </ul>'''
+    adapter._parse_history_dialog(BeautifulSoup(timeline_html, "html.parser"), history)
+    assert len(history.owner_change_log) == 2
+    assert any(event.category == "용도 변경" and event.date == "2022-07-01" for event in history.history_events)
+
+
+def test_insurance_dialog_without_gap_evidence_does_not_mark_coverage_verified():
+    html = '''<div class="el-dialog__body"><h2>보험사고이력 상세 정보</h2>
+      <div class="hisBox"><ul><li><p>소유자 변경</p><strong>없음</strong></li>
+      <li><p>차량번호 변경</p><strong>없음</strong></li></ul></div></div>'''
+    history = InsuranceHistory(owner_change_count=None)
+    KcarDetailAdapter.__new__(KcarDetailAdapter)._parse_insurance_dialog(BeautifulSoup(html, "html.parser"), history)
+    assert history.history_detail_status == "available"
+    assert history.coverage_verified is False
+    assert history.history_warnings["자차 보험 미가입 기간"] == "미확인"
 
 
 def test_find_message_content_picks_history_section_not_general_summary():

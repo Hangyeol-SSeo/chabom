@@ -126,13 +126,14 @@ class ThirdPartyInspection:
 @dataclass
 class PerformanceRecord:
     panel_exchange: list[str] = field(default_factory=list)
+    panel_exchange_count: Optional[int] = None
     panel_repairs: list[str] = field(default_factory=list)
     frame_damage: list[str] = field(default_factory=list)
     leak_records: list[str] = field(default_factory=list)
     inspection_results: dict[str, str] = field(default_factory=dict)
     record_url: str = ""
+    record_images: list[str] = field(default_factory=list)  # 기록부가 이미지로 등록·제공된 경우
     record_available: bool = False
-    record_images: list[str] = field(default_factory=list)  # 기록부가 스캔 이미지로만 등록된 경우
     third_party_inspection: ThirdPartyInspection = field(default_factory=ThirdPartyInspection)
 
 
@@ -233,13 +234,14 @@ class Listing:
         tpi = ThirdPartyInspection(**pr.get("third_party_inspection", {}))
         performance_record = PerformanceRecord(
             panel_exchange=pr.get("panel_exchange", []),
+            panel_exchange_count=pr.get("panel_exchange_count"),
             panel_repairs=pr.get("panel_repairs", []),
             frame_damage=pr.get("frame_damage", []),
             leak_records=pr.get("leak_records", []),
             inspection_results=pr.get("inspection_results", {}),
             record_url=pr.get("record_url", ""),
-            record_available=pr.get("record_available", False),
             record_images=pr.get("record_images", []),
+            record_available=pr.get("record_available", False),
             third_party_inspection=tpi,
         )
 

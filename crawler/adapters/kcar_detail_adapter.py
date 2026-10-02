@@ -20,16 +20,24 @@ from __future__ import annotations
 
 import logging
 import re
+from calendar import monthrange
+from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 
 from crawler.browser_fetch import BrowserFetcher
 from normalizer.schema import (
     Dealer,
+    DamageClaim,
+    HistoryEvent,
+    InfoUnavailablePeriod,
     InsuranceHistory,
     Listing,
     ListingText,
+    OtherPartyDamageClaim,
+    OwnerChangeLogEntry,
     PerformanceRecord,
     Photos,
     ThirdPartyInspection,
@@ -42,6 +50,7 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://www.kcar.com"
 SEARCH_WARMUP_URL = f"{BASE_URL}/bc/search"
 CARHISTORY_URL = "https://www.carhistory.or.kr/main.car"
+AUTH_STATE_PATH = Path(__file__).resolve().parents[2] / "data" / "kcar_auth_state.json"
 
 _FUEL_MAP = {
     "가솔린": "gasoline",
@@ -67,7 +76,7 @@ class KcarDetailAdapter:
     source = "kcar"
 
     def __init__(self, fetcher: Optional[BrowserFetcher] = None, timeout_sec: float = 25.0):
-        self.fetcher = fetcher or BrowserFetcher()
+        self.fetcher = fetcher or BrowserFetcher(storage_state=AUTH_STATE_PATH)
         self.timeout_sec = timeout_sec
 
     def parse_detail(self, url: str) -> Listing:
@@ -76,27 +85,29 @@ class KcarDetailAdapter:
             raise RuntimeError(f"케이카 상세 URL에서 i_sCarCd를 찾을 수 없습니다(carCd= 파라미터는 다른 이름입니다): {url}")
         listing_id = m.group(1)
 
-        html = self.fetcher.get_html(
-            url,
-            timeout_sec=self.timeout_sec,
-            warmup_url=SEARCH_WARMUP_URL,
-            wait_selector=".carInfoKeyArea",
-            post_wait_ms=2500,
-        )
-        if html is None:
-            raise RuntimeError(f"상세페이지를 가져오지 못했습니다: {url}")
-        soup = BeautifulSoup(html, "html.parser")
+        page = self.fetcher.new_page()
+        try:
+            try:
+                page.goto(SEARCH_WARMUP_URL, wait_until="domcontentloaded", timeout=self.timeout_sec * 1000)
+                page.wait_for_timeout(1500)
+            except Exception as exc:
+                logger.info("K Car 검색 화면 준비 실패(상세 조회 계속): %s", type(exc).__name__)
+            page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_sec * 1000)
+            page.wait_for_selector(".carInfoKeyArea", timeout=self.timeout_sec * 1000)
+            page.wait_for_timeout(2500)
+            soup = BeautifulSoup(page.content(), "html.parser")
+            vehicle = self._parse_vehicle(soup)
+            if vehicle.price_krw is None and vehicle.model_year is None:
+                raise RuntimeError(
+                    f"매물 데이터를 확인할 수 없습니다(판매완료/삭제되었거나 페이지 구조가 바뀌었을 수 있음): {url}"
+                )
+            performance_record = self._parse_performance_record(soup)
+            insurance_history = self._parse_insurance_history(soup)
+            self._enrich_insurance_from_dialogs(page, insurance_history)
+            self._enrich_performance_from_dialog(page, performance_record, url)
+        finally:
+            page.close()
 
-        vehicle = self._parse_vehicle(soup)
-        if vehicle.price_krw is None and vehicle.model_year is None:
-            # 매물이 삭제/판매완료됐을 때도 페이지 자체는 200으로 응답하고 빈 템플릿만 보여준다
-            # (실측 확인) — 이 경우를 조용히 "빈 매물"로 반환하지 않고 명시적으로 실패시킨다.
-            raise RuntimeError(
-                f"매물 데이터를 확인할 수 없습니다(판매완료/삭제되었거나 페이지 구조가 바뀌었을 수 있음): {url}"
-            )
-
-        performance_record = self._parse_performance_record(soup)
-        insurance_history = self._parse_insurance_history(soup)
         dealer = self._parse_dealer(soup)
         listing_text = self._parse_listing_text(soup)
         photos = self._parse_photos(soup)
@@ -170,30 +181,40 @@ class KcarDetailAdapter:
         """외판(#ext)과 프레임(#frame) 진단을 따로 읽는다 — 이 프로젝트에서 프레임 손상을
         실제로 판정할 수 있는 유일한 소스다(모듈 docstring 참고)."""
 
-        def counts(section_id: str) -> tuple[int, int]:
+        def counts(section_id: str) -> Optional[tuple[int, int]]:
             section = soup.select_one(f"#{section_id} ul.labels")
             if not section:
-                return (0, 0)
+                return None
             texts = [li.get_text(strip=True) for li in section.select("li")]
             panel = next((_to_int(t) or 0 for t in texts if "판금" in t), 0)
             exchange = next((_to_int(t) or 0 for t in texts if "교환" in t), 0)
             return (panel, exchange)
 
-        ext_panel, ext_exchange = counts("ext")
-        frame_panel, frame_exchange = counts("frame")
+        ext_counts, frame_counts = counts("ext"), counts("frame")
+        ext_panel, ext_exchange = ext_counts or (0, 0)
+        frame_panel, frame_exchange = frame_counts or (0, 0)
 
         panel_exchange = []
-        if ext_panel or ext_exchange:
-            panel_exchange.append(f"외판 판금 {ext_panel}건/교환 {ext_exchange}건(케이카 진단)")
+        panel_repairs = []
+        if ext_exchange:
+            panel_exchange.append(f"외판 교환 {ext_exchange}건(케이카 진단)")
+        if ext_panel:
+            panel_repairs.append(f"외판 판금 {ext_panel}건(케이카 진단)")
 
-        frame_ok = frame_panel == 0 and frame_exchange == 0
+        frame_ok = frame_panel == 0 and frame_exchange == 0 if frame_counts else None
         frame_damage = []
-        if not frame_ok:
+        if frame_ok is False:
             frame_damage.append(f"프레임 판금 {frame_panel}건/교환 {frame_exchange}건(케이카 진단)")
 
         return PerformanceRecord(
             panel_exchange=panel_exchange,
+            panel_exchange_count=ext_exchange if ext_counts else None,
+            panel_repairs=panel_repairs,
             frame_damage=frame_damage,
+            inspection_results={
+                "케이카 진단 · 외판": f"판금 {ext_panel}건 · 교환 {ext_exchange}건",
+                "케이카 진단 · 주요골격": f"판금 {frame_panel}건 · 교환 {frame_exchange}건",
+            } if ext_counts and frame_counts else {},
             third_party_inspection=ThirdPartyInspection(provider="kcar_diagnosis", frame_ok=frame_ok),
         )
 
@@ -216,7 +237,216 @@ class KcarDetailAdapter:
         history_note = self._find_message_content(soup, "과거이력")
         history_disclosed = True if history_note else None
 
-        return InsuranceHistory(history_disclosed=history_disclosed)
+        return InsuranceHistory(history_disclosed=history_disclosed, owner_change_count=None)
+
+    @staticmethod
+    def _normalize_date(raw: str, *, end_of_month: bool = False) -> str:
+        match = re.search(r"(\d{4})[년.\-/]\s*(\d{1,2})(?:[월.\-/]\s*(\d{1,2}))?", raw)
+        if not match:
+            return raw.strip()
+        year, month = int(match.group(1)), int(match.group(2))
+        if not 1 <= month <= 12:
+            return raw.strip()
+        day = int(match.group(3)) if match.group(3) else monthrange(year, month)[1] if end_of_month else 1
+        return f"{year:04d}-{month:02d}-{day:02d}"
+
+    @staticmethod
+    def _status_flag(raw: str) -> Optional[bool]:
+        value = raw.strip()
+        if value == "없음" or value == "0회":
+            return False
+        if value == "있음" or re.search(r"[1-9]\d*\s*(?:회|건)", value):
+            return True
+        return None
+
+    def _parse_insurance_dialog(self, soup: BeautifulSoup, history: InsuranceHistory) -> None:
+        summary = soup.select_one(".el-dialog__body .hisBox")
+        if not summary or not soup.find(string=re.compile("보험사고이력 상세 정보")):
+            return
+
+        values = {}
+        for item in summary.select("li"):
+            label, value = item.select_one("p"), item.select_one("strong")
+            if label and value:
+                values[label.get_text(" ", strip=True)] = value.get_text(" ", strip=True)
+        if not {"소유자 변경", "차량번호 변경"}.issubset(values):
+            return
+
+        history.history_disclosed = True
+        history.history_detail_status = "available"
+        history.coverage_verified = False
+        for label, attribute in (("전손 보험사고", "total_loss"), ("도난 보험사고", "theft"), ("침수 보험사고", "flood_damage")):
+            setattr(history, attribute, self._status_flag(values.get(label, "")))
+        for label, attribute in (("소유자 변경", "owner_change_count"), ("차량번호 변경", "number_change_count")):
+            raw = values[label]
+            setattr(history, attribute, 0 if raw == "없음" else _to_int(raw))
+        for label, count_attr, amount_attr in (
+            ("내차 피해", "own_damage_count", "own_damage_total_krw"),
+            ("상대차 피해", "other_party_damage_count", "other_party_damage_total_krw"),
+        ):
+            raw = values.get(label, "")
+            setattr(history, count_attr, 0 if raw == "없음" else _to_int(raw.split("회", 1)[0]))
+            amount = re.search(r"\(([\d,]+)원\)", raw)
+            setattr(history, amount_attr, _to_int(amount.group(1)) if amount else 0 if raw == "없음" else None)
+
+        for heading in soup.select("h3"):
+            if "자동차 특수 용도 이력 정보" not in heading.get_text(" ", strip=True):
+                continue
+            section = heading.parent.find_next_sibling(class_="hisBox")
+            if not section:
+                break
+            for item in section.select("li"):
+                label, value = item.select_one("p"), item.select_one("strong")
+                if not label or not value:
+                    continue
+                flag = self._status_flag(value.get_text(" ", strip=True))
+                label_text = label.get_text(" ", strip=True)
+                if flag is True:
+                    history.history_warnings[label_text] = value.get_text(" ", strip=True)
+                if "대여" in label_text and flag is True:
+                    history.usage_history.rental_used = True
+                if "영업" in label_text and flag is True:
+                    history.usage_history.taxi_used = True
+                if "관용" in label_text and flag is True:
+                    history.usage_history.business_used = True
+
+        gap_box = soup.select_one(".boxDesc.insuBox")
+        gap = gap_box.select_one(".insuTxt strong") if gap_box else None
+        if gap:
+            history.coverage_verified = True
+            raw = gap.get_text(" ", strip=True)
+            periods = raw.split("~", 1)
+            if len(periods) == 2:
+                history.info_unavailable_periods.append(InfoUnavailablePeriod(
+                    start=self._normalize_date(periods[0]),
+                    end=self._normalize_date(periods[1], end_of_month=True),
+                ))
+            else:
+                history.info_unavailable_periods.append(InfoUnavailablePeriod())
+            history.history_warnings["자차 보험 미가입 기간"] = raw
+        elif gap_box and re.search(r"없음|없습니다|해당 없음", gap_box.get_text(" ", strip=True)):
+            history.coverage_verified = True
+            history.history_warnings["자차 보험 미가입 기간"] = "없음"
+        else:
+            history.history_warnings["자차 보험 미가입 기간"] = "미확인"
+
+        usages = []
+        for row in soup.select("table.hisTb tbody tr"):
+            cells = [cell.get_text(" ", strip=True) for cell in row.select("td")]
+            if len(cells) < 4:
+                continue
+            date = self._normalize_date(cells[0])
+            if cells[3] and cells[3] != "-":
+                usages.append(cells[3])
+            if "변경" in cells[1]:
+                history.history_events.append(HistoryEvent(category="소유자 변경", date=date, summary=cells[3]))
+                history.owner_change_log.append(OwnerChangeLogEntry(date=date, note=cells[3]))
+            if cells[2] not in {"", "-", "없음"}:
+                history.history_events.append(HistoryEvent(category="차량번호 변경", date=date, summary=cells[2]))
+        if usages:
+            history.history_warnings["변경이력 표 차량용도"] = ", ".join(dict.fromkeys(usages))
+            history.usage_change_count = sum(a != b for a, b in zip(usages, usages[1:])) if len(set(usages)) > 1 else None
+
+        for accident in soup.select(".accList .accWrap"):
+            date_tag = accident.select_one(".accTit span")
+            date = self._normalize_date(date_tag.get_text(" ", strip=True)) if date_tag else None
+            for cell in accident.select("table.cont td"):
+                rows = cell.select("li")
+                if not rows:
+                    continue
+                kind = rows[0].select_one(".dataList span")
+                kind_text = kind.get_text(" ", strip=True) if kind else ""
+                amount = 0
+                costs = {}
+                for row in rows:
+                    label = row.select_one(".dataList span")
+                    value = row.select_one(".dataList strong")
+                    if label and value and "수리(견적)비용" in label.get_text(" ", strip=True):
+                        amount = _to_int(value.get_text(" ", strip=True)) or 0
+                    for pair in row.select(".price dl"):
+                        key, number = pair.select_one("dt"), pair.select_one("dd")
+                        if key and number:
+                            costs[key.get_text(" ", strip=True)] = _to_int(number.get_text(" ", strip=True))
+                if amount and kind_text == "내차 피해":
+                    history.own_damage_claims.append(DamageClaim(
+                        date=date, amount_krw=amount, parts_cost=costs.get("부품"),
+                        labor_cost=costs.get("공임"), paint_cost=costs.get("도장"),
+                    ))
+                elif amount and kind_text == "상대차 피해":
+                    history.other_party_damage_claims.append(OtherPartyDamageClaim(date=date, amount_krw=amount))
+
+    def _parse_history_dialog(self, soup: BeautifulSoup, history: InsuranceHistory) -> None:
+        for cell in soup.select("li.cell.toggle"):
+            heading = cell.select_one(".cell-top .label")
+            if not heading:
+                continue
+            category = heading.get_text(" ", strip=True)
+            value = cell.select_one(".cell-top .value")
+            raw_date = value.get_text(" ", strip=True) if value else ""
+            date = self._normalize_date(raw_date) if raw_date else ""
+            details = [p.get_text(" ", strip=True) for p in cell.select(".cell-content .dot-list > li > p")]
+            details = [item for item in details if item and not item.startswith(("정보조회일", "위 정보는"))]
+            summary = " · ".join(details[:4])
+            existing = next((event for event in history.history_events if event.category == category and event.date == date), None)
+            if existing:
+                existing.summary = summary or existing.summary
+            else:
+                history.history_events.append(HistoryEvent(category=category, date=date, summary=summary))
+                if category == "소유자 변경":
+                    history.owner_change_log.append(OwnerChangeLogEntry(date=date, note=summary))
+        if history.usage_change_count is None:
+            usage_events = [event for event in history.history_events if "용도" in event.category and "변경" in event.category]
+            if usage_events:
+                history.usage_change_count = len(usage_events)
+        history.history_events.sort(key=lambda item: item.date or "")
+
+    def _enrich_insurance_from_dialogs(self, page, history: InsuranceHistory) -> None:
+        dialogs = (
+            ("#mkt_carInsuDtlPop", "보험이력 상세", self._parse_insurance_dialog),
+            ("#mkt_insuHistTimeLine", "과거이력 상세", self._parse_history_dialog),
+        )
+        for selector, title, parse in dialogs:
+            dialog = None
+            try:
+                page.locator(selector).click(timeout=5000)
+                dialog = page.locator(".el-dialog__wrapper:visible").filter(has_text=title)
+                dialog.wait_for(state="visible", timeout=10000)
+                if title == "보험이력 상세":
+                    dialog.locator(".hisBox li").first.wait_for(timeout=10000)
+                else:
+                    dialog.locator("li.cell.toggle").first.wait_for(timeout=10000)
+                parse(BeautifulSoup(dialog.inner_html(), "html.parser"), history)
+            except Exception as exc:
+                logger.info("K Car %s 화면 미확인: %s", title, type(exc).__name__)
+                if "/login" in page.url:
+                    history.history_detail_status = "login_required"
+            finally:
+                if dialog and dialog.is_visible():
+                    dialog.locator(".el-dialog__headerbtn").click(timeout=2000)
+
+    def _enrich_performance_from_dialog(self, page, record: PerformanceRecord, detail_url: str) -> None:
+        dialog = None
+        try:
+            page.locator("#mkt_carInspId").click(timeout=5000)
+            dialog = page.locator(".el-dialog__wrapper:visible").filter(has_text="성능·상태 점검기록부")
+            dialog.wait_for(state="visible", timeout=10000)
+            images = dialog.locator(".carResultImg img")
+            images.first.wait_for(timeout=10000)
+            urls = images.evaluate_all("nodes => nodes.map(node => node.currentSrc || node.src)")
+            record.record_images = [url for url in dict.fromkeys(urls)
+                                    if urlparse(url).scheme == "https" and urlparse(url).hostname == "img.kcar.com"]
+            record.record_available = bool(record.record_images)
+            if record.record_available:
+                record.record_url = detail_url
+            for item in dialog.locator(".car_result_list li").all_text_contents():
+                parts = item.strip().splitlines()
+                if len(parts) > 1:
+                    record.inspection_results[parts[0].strip()] = parts[-1].strip()
+        except Exception as exc:
+            logger.info("K Car 성능기록부 화면 미확인: %s", type(exc).__name__)
+        finally:
+            if dialog and dialog.is_visible():
+                dialog.locator(".el-dialog__headerbtn").click(timeout=2000)
 
     def _parse_accident_badge(self, soup: BeautifulSoup) -> str:
         """사고진단 배지(예: "단순수리", "무사고") — claims_parsed에 참고용으로만 담는다."""

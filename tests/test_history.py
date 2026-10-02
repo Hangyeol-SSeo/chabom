@@ -1,3 +1,4 @@
+import asyncio
 import json
 from contextlib import closing
 
@@ -53,7 +54,7 @@ def test_lookup_and_favorite_endpoints(tmp_path, monkeypatch):
     monkeypatch.setattr(server, 'HISTORY_DB_PATH', tmp_path / 'history.db')
     monkeypatch.setattr(server, 'DEALERS_DB_PATH', str(tmp_path / 'dealers.db'))
     monkeypatch.setattr(server, '_lookup', lambda req: {'ok': False, 'reason': '테스트 조회 실패'})
-    result = server.lookup(server.LookupRequest(url='https://example.com/car'))
+    result = asyncio.run(server.lookup(server.LookupRequest(url='https://example.com/car')))
     item_id = result['history_id']
     assert server.get_history()['items'][0]['status'] == 'failed'
     server.favorite_history(item_id, server.FavoriteRequest(favorite=True))
@@ -61,6 +62,46 @@ def test_lookup_and_favorite_endpoints(tmp_path, monkeypatch):
     with pytest.raises(HTTPException) as error:
         server.favorite_history(999, server.FavoriteRequest(favorite=True))
     assert error.value.status_code == 404
+
+
+def test_encar_lookup_copies_open_browser_session_first(tmp_path, monkeypatch):
+    import server
+    monkeypatch.setattr(server, 'HISTORY_DB_PATH', tmp_path / 'history.db')
+    copied = []
+
+    async def snapshot():
+        copied.append(True)
+
+    monkeypatch.setattr(server._encar_session, 'snapshot', snapshot)
+    monkeypatch.setattr(server, '_identify_source', lambda _url: ('encar', True))
+
+    def fake_lookup(_req):
+        assert copied == [True]
+        return {'ok': False, 'reason': '합성 조회 실패'}
+
+    monkeypatch.setattr(server, '_lookup', fake_lookup)
+    result = asyncio.run(server.lookup(server.LookupRequest(url='https://encar.example.com/cars/detail/00000000')))
+    assert result['ok'] is False
+
+
+def test_kcar_lookup_copies_open_browser_session_first(tmp_path, monkeypatch):
+    import server
+    monkeypatch.setattr(server, 'HISTORY_DB_PATH', tmp_path / 'history.db')
+    copied = []
+
+    async def snapshot():
+        copied.append(True)
+
+    monkeypatch.setattr(server._kcar_session, 'snapshot', snapshot)
+    monkeypatch.setattr(server, '_identify_source', lambda _url: ('kcar', True))
+
+    def fake_lookup(_req):
+        assert copied == [True]
+        return {'ok': False, 'reason': '합성 조회 실패'}
+
+    monkeypatch.setattr(server, '_lookup', fake_lookup)
+    result = asyncio.run(server.lookup(server.LookupRequest(url='https://kcar.example.com/bc/detail/carInfoDtl?i_sCarCd=SYNTHETIC')))
+    assert result['ok'] is False
 
 
 def test_verify_saves_manual_link(tmp_path, monkeypatch):
